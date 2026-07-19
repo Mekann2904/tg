@@ -1,1 +1,26 @@
-/.DS_Store
+.DS_Store
+
+# Dependencies
+node_modules/
+
+# Debug / runtime logs
+/kitty-webview-debug.log
+
+# Native build artifacts
+native/build/
+native/**/target/
+
+# CEF build artifacts (helper app + vendored CEF)
+native/cef-helper/build/
+native/cef-helper/kitty-cef-helper.app/
+native/cef-helper/Frameworks/
+native/cef-helper/cef/
+native/cef-helper/cef.tar.bz2
+
+# Local prototype extracted into this standalone project
+/prototype/
+
+# pi / agent caches
+.mekann/
+.pi/
+.pi-cache-friendly/
