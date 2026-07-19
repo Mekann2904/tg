@@ -1,5 +1,8 @@
 # tg
 
+> **Beta.** This project is under active development. APIs, flags, and behavior
+> may change without notice, and some code paths are known to be unstable.
+
 Offscreen browser (CEF) rendered inside the [kitty](https://sw.kovidgoyal.net/)
 terminal via the Kitty Graphics Protocol. Extracted from the `kitty-web-ui`
 prototype.
