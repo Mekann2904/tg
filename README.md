@@ -89,7 +89,9 @@ KITTY_WEBVIEW_TRANSIENT_HINT=0 bun run src/main.ts https://example.com
 Other knobs: `KITTY_WEBVIEW_PIXEL_FORMAT` (`rgba` default; use `rgb` to
 force the 24-bit path, which costs less bandwidth but triggers a CPU
 RGB24→ARGB8 expansion on Apple Silicon),
-`KITTY_WEBVIEW_PIXEL_DIFF` (on by default).
+`KITTY_WEBVIEW_PIXEL_DIFF` (on by default), and
+`KITTY_WEBVIEW_DIRTY_THRESHOLD_PERCENT` (`0` by default, so full frames are
+sent; set `1`–`100` to opt into partial updates as a performance tradeoff).
 
 ## Layout
 

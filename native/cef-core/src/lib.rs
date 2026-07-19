@@ -221,7 +221,7 @@ pub extern "C" fn kitty_core_write_bgra_frame(
     let mut dirty_source = "full";
     let mut skip_unchanged = false;
     let dirty = if !source_changed {
-        let search_rect = clamp_dirty_rect(
+        let cef_dirty = clamp_dirty_rect(
             dirty_valid,
             dirty_x,
             dirty_y,
@@ -233,7 +233,10 @@ pub extern "C" fn kitty_core_write_bgra_frame(
         .unwrap_or_else(|| full_rect(width, height));
 
         if pixel_diff_enabled() {
-            match diff_bgra_rect(&core.last_bgra_frame, bgra, width, search_rect) {
+            // CEF dirty rects can omit the old location of an element after a
+            // layout shift. Diff the complete delivered frame so both the old
+            // and new regions are included in the emitted bounding delta.
+            match diff_bgra_rect(&core.last_bgra_frame, bgra, width, full_rect(width, height)) {
                 Some(rect) if should_use_dirty_rect(rect, width, height) => {
                     dirty_source = "diff";
                     Some(rect)
@@ -244,9 +247,9 @@ pub extern "C" fn kitty_core_write_bgra_frame(
                     None
                 }
             }
-        } else if should_use_dirty_rect(search_rect, width, height) {
+        } else if should_use_dirty_rect(cef_dirty, width, height) {
             dirty_source = "cef";
-            Some(search_rect)
+            Some(cef_dirty)
         } else {
             None
         }
@@ -489,11 +492,17 @@ fn frame_debug_enabled(_debug: bool) -> bool {
 }
 
 fn dirty_threshold_percent() -> u32 {
-    std::env::var("KITTY_WEBVIEW_DIRTY_THRESHOLD_PERCENT")
-        .ok()
+    let value = std::env::var("KITTY_WEBVIEW_DIRTY_THRESHOLD_PERCENT").ok();
+    parse_dirty_threshold_percent(value.as_deref())
+}
+
+fn parse_dirty_threshold_percent(value: Option<&str>) -> u32 {
+    value
         .and_then(|v| v.parse::<u32>().ok())
-        .map(|v| v.clamp(1, 100))
-        .unwrap_or(95)
+        .map(|v| v.min(100))
+        // Partial animation-frame updates can briefly corrupt rectangular
+        // regions on Kitty. Full frames are the correctness-first default.
+        .unwrap_or(0)
 }
 
 fn env_bool(name: &str, default: bool) -> bool {
@@ -871,6 +880,33 @@ mod frame_diff_tests {
         );
 
         assert_eq!(rect, Some(DirtyRect { x: 1, y: 0, width: 4, height: 3 }));
+    }
+
+    #[test]
+    fn full_frame_diff_includes_old_and_new_locations_after_layout_shift() {
+        let width = 6usize;
+        let height = 1usize;
+        let mut previous = vec![0u8; width * height * 4];
+        let mut current = previous.clone();
+        previous[1 * 4] = 255;
+        current[4 * 4] = 255;
+
+        let rect = diff_bgra_rect(
+            &previous,
+            &current,
+            width as u32,
+            full_rect(width as u32, height as u32),
+        );
+
+        assert_eq!(rect, Some(DirtyRect { x: 1, y: 0, width: 4, height: 1 }));
+    }
+
+    #[test]
+    fn zero_dirty_threshold_really_disables_partial_frames() {
+        assert_eq!(parse_dirty_threshold_percent(None), 0);
+        assert_eq!(parse_dirty_threshold_percent(Some("0")), 0);
+        assert_eq!(parse_dirty_threshold_percent(Some("95")), 95);
+        assert_eq!(parse_dirty_threshold_percent(Some("999")), 100);
     }
 
     #[test]
