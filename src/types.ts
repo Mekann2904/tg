@@ -69,9 +69,16 @@ export type InputEvent =
 
 export type PixelFormat = "rgba" | "rgb";
 
-export type ScreenshotFrame =
-  | { kind: "buffer"; seq?: number; data: Buffer; width: number; height: number; format: PixelFormat; transfer?: "direct"; dirty?: DirtyRect }
-  | { kind: "file"; seq?: number; path: string; byteLength: number; width: number; height: number; format: PixelFormat; transfer?: "file" | "shm" | "direct"; dirty?: DirtyRect };
+export type ScreenshotFrame = {
+  kind: "file";
+  seq?: number;
+  path: string;
+  byteLength: number;
+  width: number;
+  height: number;
+  format: PixelFormat;
+  dirty?: DirtyRect;
+};
 
 export interface DirtyRect {
   x: number;

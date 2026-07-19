@@ -1751,17 +1751,14 @@ class KittyCefClient : public CefClient,
       return;
     }
 
-    const std::string transfer = meta.transfer_ptr ? meta.transfer_ptr : "file";
-
     std::ostringstream hdr;
-    hdr << "{\"type\":\"" << (transfer == "direct" ? "frame" : "frameFile") << "\""
+    hdr << "{\"type\":\"frameFile\""
         << ",\"seq\":" << meta.seq
         << ",\"generation\":" << state_->generation.load()
         << ",\"width\":" << meta.width
         << ",\"height\":" << meta.height
         << ",\"stride\":" << meta.stride
         << ",\"format\":\"" << (state_->rgb ? "rgb" : "rgba") << "\""
-        << ",\"transfer\":\"" << jsonEscape(transfer) << "\""
         << ",\"byteLength\":" << meta.byte_len;
 
     if (meta.dirty_valid) {
@@ -1772,15 +1769,9 @@ class KittyCefClient : public CefClient,
           << "}";
     }
 
-    if (transfer == "direct") {
-      hdr << "}";
-      if (!meta.data_ptr || meta.byte_len == 0) return;
-      state_->server.SendFrame(hdr.str(), meta.data_ptr, meta.byte_len);
-    } else {
-      hdr << ",\"path\":\"" << jsonEscape(meta.path_ptr ? meta.path_ptr : "") << "\""
-          << "}";
-      state_->server.SendHeader(hdr.str());
-    }
+    hdr << ",\"path\":\"" << jsonEscape(meta.path_ptr ? meta.path_ptr : "") << "\""
+        << "}";
+    state_->server.SendHeader(hdr.str());
 
     state_->sent_frame_seq.store(meta.seq, std::memory_order_relaxed);
 
@@ -1790,7 +1781,7 @@ class KittyCefClient : public CefClient,
                    meta.width,
                    meta.height,
                    meta.byte_len,
-                   transfer.c_str(),
+                   (meta.transfer_ptr ? meta.transfer_ptr : "shm"),
                    meta.dirty_valid ? meta.dirty_width : 0,
                    meta.dirty_valid ? meta.dirty_height : 0,
                    meta.dirty_valid ? meta.dirty_x : 0,

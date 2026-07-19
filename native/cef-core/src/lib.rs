@@ -14,7 +14,7 @@ pub use command::Command;
 pub use frame::{convert_bgra_into, convert_bgra_rect_into, DirtyRect};
 pub use protocol::build_frame_header;
 pub use semantic::{build_assist_editable_click_js, build_cursor_event_json, build_edit_key_js, build_hit_test_js, build_insert_text_js, c_string_from_ptr, cstring_lossy, strip_hit_test_console_prefix};
-pub use slots::FrameSlots;
+pub use slots::ShmSlots;
 
 // ---------------------------------------------------------------------------
 // C ABI constants (must match kitty_cef_core.h)
@@ -91,7 +91,7 @@ pub struct KittyCoreCommandMeta {
 pub struct KittyCore {
     debug: bool,
     rgb: bool,
-    slots: FrameSlots,
+    slots: ShmSlots,
     last_error: String,
     converted_frame: Vec<u8>,
     last_bgra_frame: Vec<u8>,
@@ -119,11 +119,11 @@ thread_local! {
 
 #[no_mangle]
 pub extern "C" fn kitty_core_new(debug: bool) -> *mut KittyCore {
-    let slots = FrameSlots::new();
+    let slots = ShmSlots::new();
     core_log(
         LogLevel::Info,
         "core",
-        &format!("created rawMode={} slots={}", slots.mode(), slots.slot_count()),
+        &format!("created transport={}", slots.mode()),
     );
 
     let core = Box::new(KittyCore {
@@ -275,30 +275,15 @@ pub extern "C" fn kitty_core_write_bgra_frame(
     let stride = width as usize * if core.rgb { 3 } else { 4 };
     let byte_len = core.converted_frame.len();
 
-    // Adaptive transport: full frames and large deltas go through the stored
-    // transport (shm) to avoid PTY congestion; small dirty deltas go direct
-    // (inline base64, memory-only). If the stored transport cannot accept the
-    // payload, fall back to direct so the frame is delivered, not dropped.
-    let full_frame = dirty.is_none();
-    let transfer = core.slots.choose(byte_len, full_frame);
-
-    let mut direct_data_ptr: *const u8 = std::ptr::null();
-    let written = if transfer == slots::TransferKind::Direct {
-        direct_data_ptr = core.converted_frame.as_ptr();
-        slots::FrameWrite {
-            name: String::new(),
-            transfer: slots::TransferKind::Direct,
-        }
-    } else {
-        match core.slots.write_stored(&core.converted_frame) {
-            Some(w) => w,
-            None => {
-                direct_data_ptr = core.converted_frame.as_ptr();
-                slots::FrameWrite {
-                    name: String::new(),
-                    transfer: slots::TransferKind::Direct,
-                }
-            }
+    // POSIX shm is the only transport. Each frame is written to a single-use
+    // shm object whose name Kitty reads via t=s, so pixels bypass the PTY.
+    let written = match core.slots.write(&core.converted_frame) {
+        Some(name) => name,
+        None => {
+            let msg = "shm_write_failed".to_string();
+            core_log(LogLevel::Warn, "frame", &msg);
+            core.last_error = msg;
+            return -3;
         }
     };
 
@@ -329,7 +314,7 @@ pub extern "C" fn kitty_core_write_bgra_frame(
     out_ref.height = height;
     out_ref.stride = stride as u32;
     out_ref.byte_len = byte_len;
-    out_ref.data_ptr = direct_data_ptr;
+    out_ref.data_ptr = std::ptr::null();
     if let Some(rect) = dirty {
         out_ref.dirty_valid = 1;
         out_ref.dirty_x = rect.x;
@@ -348,12 +333,12 @@ pub extern "C" fn kitty_core_write_bgra_frame(
     }
 
     LAST_PATH.with(|lp| {
-        *lp.borrow_mut() = cstring_lossy(&written.name);
+        *lp.borrow_mut() = cstring_lossy(&written);
         out_ref.path_ptr = lp.borrow().as_ptr();
     });
 
     LAST_TRANSFER.with(|lt| {
-        *lt.borrow_mut() = cstring_lossy(written.transfer.as_str());
+        *lt.borrow_mut() = CString::new("shm").unwrap();
         out_ref.transfer_ptr = lt.borrow().as_ptr();
     });
 

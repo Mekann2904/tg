@@ -59,15 +59,14 @@ the complete old state or the complete new state, never an in-place partial
 update. The Kitty Graphics Protocol is implemented once, in Rust
 (`native/kitty-runtime`); there is no second renderer.
 
-The transport is chosen **per frame** from the dirty-rect size:
-
-- small deltas → `direct` (inline base64, memory-only — no shm object, no disk);
-- large deltas and full frames → `shm` (pixels bypass the PTY entirely, so video
-  and full repaints never congest the pipe).
-
-The standard CEF + Rust configuration uses shm and the two-frame staging
-pipeline. (`direct` can still be forced via `KITTY_WEBVIEW_TRANSFER=direct`,
-but that path does not provide the same atomic visible-frame guarantee.)
+The transport is **shm**: every frame (full frames and deltas alike) is
+written to a single-use POSIX shared-memory object and handed to Kitty via
+`t=s`, so pixels bypass the PTY entirely. Deltas go through the two-frame
+staging pipeline described above (copy → apply dirty rect off-screen → atomic
+select), never as an in-place edit of the visible frame. (An earlier
+`direct`/`file` inline mode was removed: in-place `a=f` frame updates are
+unreliable on some Kitty sessions, and the disk-backed `file` path broke the
+disk-write-free goal.)
 
 ## Defaults baked into this build
 
@@ -77,7 +76,7 @@ Rust-only.
 
 | Concern | Default | Why | Override |
 |---|---|---|---|
-| CEF frame transfer | **adaptive**: small deltas `direct`, large/full `shm` | `direct` for small UI/cursor deltas is memory-only and needs no shm object; `shm` for video/full frames avoids PTY congestion (full-frame `direct` flickers on some kitty sessions) | `KITTY_WEBVIEW_TRANSFER=shm\|file\|direct` (force one), `KITTY_WEBVIEW_DIRECT_THRESHOLD_BYTES` (default 384 KiB) |
+| CEF frame transfer | **shm** (single-use POSIX shm, `t=s`) | every frame bypasses the PTY; deltas run through the two-frame staging pipeline for an atomic swap; disk-write-free | — (shm is the only transport) |
 | Transient usage hint (`N=1`) | **ON** | tells kitty these frames are short-lived → skip the graphics disk cache (no per-frame SSD writes) | `KITTY_WEBVIEW_TRANSIENT_HINT=0` |
 
 If you run against a kitty **without** usage-hints support, disable the

@@ -3,13 +3,11 @@ import type { ScreenshotFrame } from "./types";
 /** A frame as it arrives from the browser helper, before rendering. */
 export interface InboundFrame {
   seq?: number;
-  data?: Buffer;
-  path?: string;
+  path: string;
   byteLength: number;
   width: number;
   height: number;
   format?: "rgba" | "rgb";
-  transfer?: "file" | "shm" | "direct";
   dirty?: { x: number; y: number; width: number; height: number };
 }
 
@@ -89,26 +87,13 @@ export class FrameSource {
 }
 
 function toScreenshot(f: InboundFrame): ScreenshotFrame {
-  if (f.path) {
-    return {
-      kind: "file",
-      seq: f.seq,
-      path: f.path,
-      byteLength: f.byteLength,
-      width: f.width,
-      height: f.height,
-      format: f.format ?? "rgba",
-      transfer: f.transfer ?? "file",
-      dirty: f.dirty,
-    };
-  }
   return {
-    kind: "buffer",
+    kind: "file",
     seq: f.seq,
-    data: f.data!,
+    path: f.path,
+    byteLength: f.byteLength,
     width: f.width,
     height: f.height,
-    transfer: f.transfer === "direct" ? "direct" : undefined,
     format: f.format ?? "rgba",
     dirty: f.dirty,
   };

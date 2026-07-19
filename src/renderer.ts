@@ -23,21 +23,18 @@ export class KittyRenderer {
   }
 
   async draw(frame: ScreenshotFrame, place: Placement) {
-    const w = frame.width;
-    const h = frame.height;
-    if (frame.kind === "buffer") {
-      await this.sendRustDirect(
-        { byteLength: frame.data.length, width: w, height: h, format: frame.format, dirty: frame.dirty },
-        place,
-        frame.data,
-      );
-    } else {
-      await this.sendRust({
-        type: "drawFile",
-        raw: { path: frame.path, byteLength: frame.byteLength, width: w, height: h, format: frame.format, transfer: frame.transfer, dirty: frame.dirty },
-        place,
-      });
-    }
+    await this.sendRust({
+      type: "drawFile",
+      raw: {
+        path: frame.path,
+        byteLength: frame.byteLength,
+        width: frame.width,
+        height: frame.height,
+        format: frame.format,
+        dirty: frame.dirty,
+      },
+      place,
+    });
   }
 
   clear() {
@@ -117,42 +114,6 @@ export class KittyRenderer {
     });
   }
 
-  private async sendRustDirect(
-    raw: { byteLength: number; width: number; height: number; format?: "rgba" | "rgb"; dirty?: { x: number; y: number; width: number; height: number } },
-    place: Placement,
-    buffer: Buffer,
-  ): Promise<void> {
-    const proc = this._rust;
-    if (!proc || !proc.stdin?.writable) return;
-
-    const command = {
-      type: "drawDirect",
-      raw: {
-        byteLength: raw.byteLength,
-        width: raw.width,
-        height: raw.height,
-        format: raw.format ?? "rgba",
-        dirty: raw.dirty,
-      },
-      place,
-    };
-
-    const header = Buffer.from(JSON.stringify(command) + "\n");
-    this._stdoutInFlight = true;
-
-    if (this.config.debug && process.env.KITTY_WEB_UI_DIRECT_DEBUG === "1") {
-      debugLog(true, `[renderer] direct write begin bytes=${buffer.length} ${raw.width}x${raw.height}`);
-    }
-    try {
-      await writeOrDrain(proc.stdin, header);
-      await writeOrDrain(proc.stdin, buffer);
-      if (this.config.debug && process.env.KITTY_WEB_UI_DIRECT_DEBUG === "1") {
-        debugLog(true, `[renderer] direct write end bytes=${buffer.length}`);
-      }
-    } finally {
-      this._stdoutInFlight = false;
-    }
-  }
 }
 
 function resolveRustRuntimePath() {
@@ -161,20 +122,3 @@ function resolveRustRuntimePath() {
   return join(process.cwd(), "native", "kitty-runtime", "target", "release", "kitty-runtime");
 }
 
-function writeOrDrain(stream: NodeJS.WritableStream, chunk: Buffer): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const done = (error?: Error | null) => {
-      if (settled) return;
-      settled = true;
-      if (error) reject(error);
-      else resolve();
-    };
-
-    const ok = stream.write(chunk, (error?: Error | null) => done(error));
-    if (!ok) {
-      stream.once("drain", () => done());
-      stream.once("error", done);
-    }
-  });
-}

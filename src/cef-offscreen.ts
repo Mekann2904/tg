@@ -93,10 +93,11 @@ export class CefBrowserController extends HelperProcessBrowserController {
           // Kitty's per-frame read/upload bandwidth by 25% versus RGBA32.
           KITTY_WEBVIEW_PIXEL_FORMAT: process.env.KITTY_WEBVIEW_PIXEL_FORMAT || "rgb",
 
-          // POSIX shared memory is the default CEF transfer path. The direct
-          // path (inline base64, a=T,t=d full re-transmit each frame) flickers
-          // on some Kitty sessions; file transfer writes to the graphics disk
-          // cache. Override with KITTY_WEBVIEW_TRANSFER=file|direct.
+          // POSIX shm (t=s) is the only frame transport: every frame bypasses
+          // the PTY and deltas run through the two-frame staging pipeline for
+          // an atomic visible-frame swap. The env pin keeps the prebuilt CEF
+          // helper (which still reads it) on shm until it is rebuilt against
+          // the shm-only cef-core.
           KITTY_WEBVIEW_TRANSFER: process.env.KITTY_WEBVIEW_TRANSFER || "shm",
 
           ...resolveCefLayerEnv(config),
