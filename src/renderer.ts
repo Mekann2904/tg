@@ -17,6 +17,8 @@ import { debugLog } from "./debug";
 export class KittyRenderer {
   private _rust?: ChildProcess;
   private _stdoutInFlight = false;
+  private runtimeOutput = Buffer.alloc(0);
+  private pendingRuntimeWrites: Array<{ resolve: () => void; reject: (error: Error) => void }> = [];
 
   constructor(private config: Config) {
     this.startRustRenderer();
@@ -68,7 +70,9 @@ export class KittyRenderer {
     }
     try {
       this._rust = spawn(command, [], {
-        stdio: ["pipe", "inherit", process.env.KITTY_WEB_UI_NATIVE_STDERR === "inherit" ? "inherit" : "pipe"],
+        // Runtime stdout is length-framed IPC. The parent is the sole terminal
+        // writer, preventing Kitty graphics APCs from racing cursor CSI output.
+        stdio: ["pipe", "pipe", process.env.KITTY_WEB_UI_NATIVE_STDERR === "inherit" ? "inherit" : "pipe"],
         env: process.env as Record<string, string>,
       });
     } catch (error) {
@@ -77,11 +81,15 @@ export class KittyRenderer {
 
     debugLog(this.config.debug, `[renderer] rust renderer enabled command=${command}`);
 
+    this._rust.stdout?.on("data", (chunk: Buffer) => this.handleRuntimeOutput(chunk));
     this._rust.stderr?.on("data", (chunk: Buffer) => {
       debugLog(this.config.debug, `[kitty-runtime] ${chunk.toString("utf8").trimEnd()}`);
     });
     this._rust.on("exit", (code, signal) => {
       debugLog(this.config.debug, `[renderer] rust renderer exited code=${code ?? "?"} signal=${signal ?? "?"}`);
+      const error = new Error(`rust renderer exited code=${code ?? "?"} signal=${signal ?? "?"}`);
+      for (const pending of this.pendingRuntimeWrites.splice(0)) pending.reject(error);
+      this._stdoutInFlight = false;
       this._rust = undefined;
     });
   }
@@ -94,24 +102,33 @@ export class KittyRenderer {
     this._stdoutInFlight = true;
 
     return new Promise((resolve, reject) => {
-      let settled = false;
-      const done = (error?: Error | null) => {
-        if (settled) return;
-        settled = true;
-        this._stdoutInFlight = false;
-        if (error) reject(error);
-        else resolve();
-      };
-
-      const ok = proc.stdin!.write(line);
-      if (ok) {
-        done();
-        return;
-      }
-
-      proc.stdin!.once("drain", () => done());
-      proc.stdin!.once("error", done);
+      this.pendingRuntimeWrites.push({ resolve, reject });
+      proc.stdin!.write(line, (error) => {
+        if (!error) return;
+        const pending = this.pendingRuntimeWrites.shift();
+        this._stdoutInFlight = this.pendingRuntimeWrites.length > 0;
+        pending?.reject(error);
+      });
     });
+  }
+
+  private handleRuntimeOutput(chunk: Buffer) {
+    this.runtimeOutput = Buffer.concat([this.runtimeOutput, chunk]);
+
+    while (this.runtimeOutput.length >= 4) {
+      const length = this.runtimeOutput.readUInt32LE(0);
+      if (this.runtimeOutput.length < 4 + length) return;
+
+      const packet = this.runtimeOutput.subarray(4, 4 + length);
+      this.runtimeOutput = this.runtimeOutput.subarray(4 + length);
+      const pending = this.pendingRuntimeWrites.shift();
+
+      process.stdout.write(packet, (error) => {
+        this._stdoutInFlight = this.pendingRuntimeWrites.length > 0;
+        if (error) pending?.reject(error);
+        else pending?.resolve();
+      });
+    }
   }
 
 }

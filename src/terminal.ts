@@ -34,6 +34,7 @@ export class TerminalController {
   private pageCursor: BrowserCursorShape = "default";
   private hitTest: BrowserHitTest | null = null;
   private pointerCell: { col: number; row: number } | null = null;
+  private lastCursorSequence = "";
 
   constructor(private config: Config) {}
 
@@ -41,8 +42,13 @@ export class TerminalController {
     this.done = new Promise((resolve) => (this.resolveDone = resolve));
     if (this.config.useAltScreen) process.stdout.write(ALT_SCREEN_ON);
     process.stdout.write(CLEAR);
-    if (this.config.hideCursor) process.stdout.write(CURSOR_HIDE);
-    else process.stdout.write(CURSOR_SHAPE_BLOCK);
+    if (this.config.hideCursor) {
+      process.stdout.write(CURSOR_HIDE);
+      this.lastCursorSequence = CURSOR_HIDE;
+    } else {
+      process.stdout.write(CURSOR_SHAPE_BLOCK);
+      this.lastCursorSequence = CURSOR_SHAPE_BLOCK;
+    }
     process.stdout.write(MOUSE_BASE);
     process.stdout.write(MOUSE_SGR);
     if (this.config.mouseMode === "sgr-pixel") process.stdout.write(MOUSE_PIXEL);
@@ -155,17 +161,22 @@ export class TerminalController {
     if (this.left) return;
 
     const cursor = this.hitTest?.cursor ?? this.pageCursor;
-    if (cursor === "text" && this.pointerCell) {
-      process.stdout.write(`${CURSOR_SHAPE_BAR}\x1b[${this.pointerCell.row};${this.pointerCell.col}H${CURSOR_SHOW}`);
-      return;
+    let sequence: string;
+    if (this.config.hideCursor) {
+      sequence = CURSOR_HIDE;
+    } else if (cursor === "text" && this.pointerCell) {
+      sequence = `${CURSOR_SHAPE_BAR}\x1b[${this.pointerCell.row};${this.pointerCell.col}H${CURSOR_SHOW}`;
+    } else if ((cursor === "pointer" || cursor === "grab" || cursor === "grabbing") && this.pointerCell) {
+      sequence = `${CURSOR_SHAPE_UNDERLINE}\x1b[${this.pointerCell.row};${this.pointerCell.col}H${CURSOR_SHOW}`;
+    } else {
+      sequence = `${CURSOR_SHAPE_BLOCK}${CURSOR_SHOW}`;
     }
 
-    if ((cursor === "pointer" || cursor === "grab" || cursor === "grabbing") && this.pointerCell && !this.config.hideCursor) {
-      process.stdout.write(`${CURSOR_SHAPE_UNDERLINE}\x1b[${this.pointerCell.row};${this.pointerCell.col}H${CURSOR_SHOW}`);
-      return;
-    }
-
-    process.stdout.write(this.config.hideCursor ? CURSOR_HIDE : `${CURSOR_SHAPE_BLOCK}${CURSOR_SHOW}`);
+    // Mouse tracking can report dozens of moves per second over video. Avoid
+    // making Kitty repaint an unchanged cursor overlay for every event.
+    if (sequence === this.lastCursorSequence) return;
+    this.lastCursorSequence = sequence;
+    process.stdout.write(sequence);
   }
 
   wait() {

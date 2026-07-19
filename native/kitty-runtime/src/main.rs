@@ -69,6 +69,14 @@ fn default_format() -> String {
     "rgba".to_string()
 }
 
+fn write_packet<W: Write>(out: &mut W, payload: &[u8]) -> Result<()> {
+    let length = u32::try_from(payload.len()).context("terminal packet too large")?;
+    out.write_all(&length.to_le_bytes()).context("write terminal packet length")?;
+    out.write_all(payload).context("write terminal packet payload")?;
+    out.flush().context("flush terminal packet")?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin.lock());
@@ -95,27 +103,36 @@ fn main() -> Result<()> {
             }
         };
 
-        match command {
+        let mut packet = Vec::new();
+        let dispose = match command {
             Command::DrawFile { raw, place } => {
-                runtime.draw_file(&mut stdout, raw, place)?;
+                runtime.draw_file(&mut packet, raw, place)?;
+                false
             }
             Command::Clear => {
-                runtime.delete_raw_images(&mut stdout)?;
-                stdout.write_all(b"\x1b[2J\x1b[H")?;
+                runtime.delete_raw_images(&mut packet)?;
+                packet.write_all(b"\x1b[2J\x1b[H")?;
                 runtime.last_place = None;
-                stdout.flush()?;
+                false
             }
             Command::ResetRawFile => {
-                runtime.delete_raw_images(&mut stdout)?;
+                runtime.delete_raw_images(&mut packet)?;
                 runtime.raw_initialized = false;
-                stdout.flush()?;
+                false
             }
             Command::Dispose => {
-                runtime.delete_raw_images(&mut stdout)?;
-                stdout.write_all(runtime.delete_sequence().as_bytes())?;
-                stdout.flush()?;
-                break;
+                runtime.delete_raw_images(&mut packet)?;
+                packet.write_all(runtime.delete_sequence().as_bytes())?;
+                true
             }
+        };
+
+        // stdout is an IPC stream to the Bun parent, not the terminal. Frame
+        // each complete terminal update so the parent can issue it as one
+        // ordered stdout write and acknowledge only after that write drains.
+        write_packet(&mut stdout, &packet)?;
+        if dispose {
+            break;
         }
     }
 

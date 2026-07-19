@@ -147,8 +147,9 @@ export class App {
         perf.drawMs = performance.now() - drawStart;
         perf.frameMs = performance.now() - frameStart;
 
-        terminal.refreshCursorOverlay();
-
+        // Cursor state is refreshed by cursor/hit-test/pointer events. Rewriting
+        // cursor CSI controls after every video frame makes Kitty repaint its
+        // cursor overlay at the capture frame rate and causes visible flicker.
         perf.sampleFrame();
       });
 
