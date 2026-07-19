@@ -1,0 +1,44 @@
+# kitty-web-ui
+
+CEF offscreen browser engine that renders web pages inside the Kitty terminal
+via the Kitty Graphics Protocol.
+
+## Language
+
+**Kitty offscreen**: The only display mode. A CEF offscreen host captures web
+page bitmaps, which are rendered in the terminal using Kitty Graphics Protocol
+(f=32 raw RGBA, or f=24 RGB).
+
+**CEF host window**: The offscreen CEF client that loads and renders the remote
+web page. Its size matches the terminal's physical pixel dimensions for 1:1
+sharp rendering on Retina displays.
+
+**Placement**: The terminal cell region where the page bitmap is drawn. Defined by xCell, yCell, cols, rows, pixelWidth, pixelHeight. Input coordinates are converted from terminal cells/pixels to browser CSS pixels using this placement.
+
+_Avoid_: Viewport, display area
+
+**Permission**: A capability a web page requests (camera, microphone, geolocation, notifications, etc.). Governed by a deny-by-default policy persisted per site.
+
+_Avoid_: Access right, privilege
+
+**Permission Profile**: A JSON file at `~/.kitty-webview/permissions.json` that stores per-origin permission grants. Managed via CLI subcommands (`permissions allow|deny|list`).
+
+**Dangerous scheme**: A URL scheme blocked at the navigation level: `file:`, `javascript:`, `data:`, `devtools:`, `chrome:`, `chrome-extension:`. Only `https:` and `http:` are allowed.
+
+_Avoid_: Unsafe protocol, blocked origin
+
+**Sandbox**: CEF/Chromium's renderer sandbox. Always enabled for remote content.
+
+**FramePump**: The render loop scheduler that drives frame capture from CEF and Kitty Graphics Protocol output. Operates in hybrid mode (fixed-rate terminal updates driven by paint/input/resize dirty flags).
+
+**Dirty rect / frame delta**: The rectangle of pixels that changed since the previous frame. CEF computes it by pixel-diffing the new frame against the previous one (with an area threshold). Only the dirty rectangle is transmitted, using the Kitty animation protocol (`a=f` scratch frame composited into a stable root frame via `a=c`), instead of re-sending the full framebuffer every paint.
+
+## Example dialogue
+
+> **Dev**: ユーザーが `https://meet.google.com` を開いたら、Permission Profile でカメラが allow になってるかチェックして、deny なら画面だけ表示される。
+>
+> **Domain expert**: そう。Permission Profile はデフォルトで全 deny。カメラが必要なら `kitty-webview permissions allow https://meet.google.com camera` を事前に実行してもらう。offscreen だから権限プロンプトの UI は出せない。
+>
+> **Dev**: 危険スキームの `javascript:` でナビゲートしようとしたら？
+>
+> **Domain expert**: will-navigate 相当のフックでブロックする。http/https 以外は一切通さない。

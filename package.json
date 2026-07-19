@@ -1,0 +1,24 @@
+{
+  "name": "kitty-webview",
+  "type": "module",
+  "bin": {
+    "kitty-webview": "./src/main.ts",
+    "kitty-webview-permissions": "./src/permissions-cli.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/main.ts",
+    "permissions": "bun run src/permissions-cli.ts permissions",
+    "check": "bun --bun tsc --noEmit",
+    "test": "bun test",
+    "build:cef": "./scripts/build-cef-helper.sh",
+    "build:kitty-runtime": "./scripts/build-kitty-runtime.sh"
+  },
+  "engines": {
+    "bun": ">=1.3.12"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "latest"
+  }
+}
