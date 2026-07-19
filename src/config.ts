@@ -18,7 +18,6 @@ export const defaultConfig: Omit<Config, "url"> = {
   quitKeys: ["ctrl-c", "ctrl-q"],
   debug: false,
   cefControlPreset: undefined,
-  kittyRenderer: "auto",
   nativeResolution: false,
 };
 
@@ -76,9 +75,6 @@ export function parseConfig(args: string[]): Config {
       case "cef-control":
         config.cefControlPreset = enumValue(takeValue(), ["basic", "semantic", "devtools", "full"], key) as Config["cefControlPreset"];
         break;
-      case "kitty-renderer":
-        config.kittyRenderer = enumValue(takeValue(), ["auto", "ts", "rust"], key) as Config["kittyRenderer"];
-        break;
       case "no-alt-screen":
         config.useAltScreen = false;
         break;
@@ -129,7 +125,7 @@ export function parseConfig(args: string[]): Config {
 
 function usage(): never {
   throw new Error(
-    "Usage: kitty-webview <url> [--cef-control=basic|semantic|devtools|full] [--kitty-renderer=auto|ts|rust] [--fps=60] [--capture-fps=N] [--site-profile=default|stable] [--width=N] [--height=N] [--scale=1] [--zoom=1] [--max-width=N] [--max-height=N] [--display-scale=1] [--resize-debounce=300] [--scroll-coalesce-ms=8] [--mouse-mode=sgr|sgr-pixel] [--no-alt-screen] [--quit-keys=ctrl-q] [--debug] [--native] [--user-agent=...]"
+    "Usage: kitty-webview <url> [--cef-control=basic|semantic|devtools|full] [--fps=60] [--capture-fps=N] [--site-profile=default|stable] [--width=N] [--height=N] [--scale=1] [--zoom=1] [--max-width=N] [--max-height=N] [--display-scale=1] [--resize-debounce=300] [--scroll-coalesce-ms=8] [--mouse-mode=sgr|sgr-pixel] [--no-alt-screen] [--quit-keys=ctrl-q] [--debug] [--native] [--user-agent=...]"
   );
 }
 

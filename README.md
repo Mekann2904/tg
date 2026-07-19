@@ -16,7 +16,7 @@ break rendering there — see "Defaults" below.
 
 - [kitty](https://sw.kovidgoyal.net/kitty/) with graphics-protocol usage hints (#10092).
 - [Bun](https://bun.sh/) `>= 1.3.12`.
-- Rust toolchain (for the native Kitty renderer): `cargo`.
+- Rust toolchain (for the Kitty graphics renderer): `cargo`.
 - A CEF binary distribution (`CEF_ROOT`) and a C++ toolchain.
 
 ## Setup
@@ -24,7 +24,7 @@ break rendering there — see "Defaults" below.
 ```bash
 bun install
 
-# Native Kitty renderer (Rust) — required for --kitty-renderer=rust
+# Kitty graphics renderer (Rust) — required
 bun run build:kitty-runtime
 
 # CEF engine helper
@@ -34,11 +34,7 @@ CEF_ROOT=/path/to/cef_binary_... bun run build:cef
 ## Run
 
 ```bash
-# CEF + Rust renderer (the tuned combo)
-bun run src/main.ts https://youtube.com --kitty-renderer=rust
-
-# CEF + TypeScript renderer (no native build needed beyond the CEF helper)
-bun run src/main.ts https://example.com --kitty-renderer=ts
+bun run src/main.ts https://youtube.com
 ```
 
 Controls:
@@ -60,7 +56,8 @@ updates are assembled in an off-screen animation frame: copy the complete
 visible frame, apply the dirty rectangle, then select the completed frame inside
 synchronized output. The two animation frames alternate, so users see either
 the complete old state or the complete new state, never an in-place partial
-update. The TypeScript fallback retains the older in-place update path.
+update. The Kitty Graphics Protocol is implemented once, in Rust
+(`native/kitty-runtime`); there is no second renderer.
 
 The transport is chosen **per frame** from the dirty-rect size:
 
@@ -69,13 +66,14 @@ The transport is chosen **per frame** from the dirty-rect size:
   and full repaints never congest the pipe).
 
 The standard CEF + Rust configuration uses shm and the two-frame staging
-pipeline. Forced direct mode and the TypeScript renderer remain compatibility
-paths and do not provide the same atomic visible-frame guarantee.
+pipeline. (`direct` can still be forced via `KITTY_WEBVIEW_TRANSFER=direct`,
+but that path does not provide the same atomic visible-frame guarantee.)
 
 ## Defaults baked into this build
 
 These defaults are what makes the CEF + Rust combo flicker-free **and**
-disk-write-free (the original motivation for #10090/#10092):
+disk-write-free (the original motivation for #10090/#10092). Rendering is
+Rust-only.
 
 | Concern | Default | Why | Override |
 |---|---|---|---|
