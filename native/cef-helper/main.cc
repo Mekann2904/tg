@@ -621,6 +621,12 @@ struct RuntimeState {
   std::atomic<uint64_t> flow_dropped_frames{0};
   std::atomic<bool> missed_paint{false};
   std::atomic<bool> staging_seed_needed{true};
+  // UI-thread-only recovery throttle. Flow-control ACKs can arrive much faster
+  // than a large OSR surface can be captured and handed to Kitty. Coalesce
+  // recovery invalidations so ACK -> ForcePaint cannot become a CPU-saturating
+  // feedback loop.
+  int64_t last_recovery_paint_ms{0};
+  bool recovery_paint_scheduled{false};
 
   std::string initial_url;
   std::string site_profile;
@@ -643,6 +649,46 @@ void ForcePaint() {
   if (!g_browser) return;
   g_browser->GetHost()->WasResized();
   g_browser->GetHost()->Invalidate(PET_VIEW);
+}
+
+constexpr int64_t kRecoveryPaintIntervalMs = 100;
+
+int64_t nowMs();
+
+class RecoveryPaintTask : public CefTask {
+ public:
+  void Execute() override {
+    CEF_REQUIRE_UI_THREAD();
+    if (!g_browser || !g_state) return;
+
+    g_state->recovery_paint_scheduled = false;
+    if (!g_state->missed_paint.load(std::memory_order_relaxed)) return;
+
+    g_state->last_recovery_paint_ms = nowMs();
+    ForcePaint();
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(RecoveryPaintTask);
+};
+
+void ScheduleRecoveryPaint() {
+  CEF_REQUIRE_UI_THREAD();
+  if (!g_browser || !g_state || g_state->recovery_paint_scheduled) return;
+
+  const int64_t elapsed = nowMs() - g_state->last_recovery_paint_ms;
+  if (elapsed >= kRecoveryPaintIntervalMs) {
+    g_state->last_recovery_paint_ms = nowMs();
+    ForcePaint();
+    return;
+  }
+
+  g_state->recovery_paint_scheduled = true;
+  CefPostDelayedTask(
+    TID_UI,
+    new RecoveryPaintTask(),
+    kRecoveryPaintIntervalMs - std::max<int64_t>(0, elapsed)
+  );
 }
 
 class ForcePaintUntilFirstFrameTask : public CefTask {
@@ -1436,10 +1482,10 @@ class CommandTask : public CefTask {
         kitty_core_force_full_frame(g_state->core);
         ForcePaint();
       } else if (g_state->missed_paint.load(std::memory_order_relaxed)) {
-        // Paints may have been coalesced while Kitty was busy. Invalidate after
-        // ACK so CEF supplies the latest complete buffer even if no new animation
-        // tick happens naturally.
-        ForcePaint();
+        // Paints may have been coalesced while Kitty was busy. Recover the
+        // latest complete buffer, but cap recovery invalidations at 10 Hz so a
+        // large surface cannot form an ACK -> ForcePaint CPU feedback loop.
+        ScheduleRecoveryPaint();
       }
       return;
     }

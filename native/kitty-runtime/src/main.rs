@@ -6,7 +6,6 @@ use std::io::{self, BufRead, BufReader, Write};
 const DISPLAY_IMAGE_ID: u32 = 200;
 const PLACEMENT_ID: u32 = 1;
 const ROOT_FRAME: u32 = 1;
-const STAGING_FRAME: u32 = 2;
 const SYNC_BEGIN: &str = "\x1b[?2026h";
 const SYNC_END: &str = "\x1b[?2026l";
 
@@ -16,8 +15,6 @@ struct Runtime {
     last_source_key: String,
     last_place: Option<Placement>,
     cleanup_image_ids: Vec<u32>,
-    current_frame: u32,
-    has_staging_frame: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -142,8 +139,6 @@ impl Runtime {
             seq.push_str(&self.delete_sequence());
             seq.push_str("\x1b[2J\x1b[H");
             self.raw_initialized = false;
-            self.current_frame = ROOT_FRAME;
-            self.has_staging_frame = false;
         }
 
         self.last_place = Some(place.clone());
@@ -177,60 +172,27 @@ impl Runtime {
             ));
             seq.push_str(&format!("\x1b_Ga=a,i={},c={},q=2;\x1b\\", DISPLAY_IMAGE_ID, ROOT_FRAME));
             self.raw_initialized = true;
-            self.current_frame = ROOT_FRAME;
-            self.has_staging_frame = false;
-        } else if !self.has_staging_frame && raw.dirty.is_some() {
-            // The second animation frame must be seeded by a full frame. Using a
-            // dirty payload to create it can produce a transparent canvas on
-            // some Kitty versions. Until the full seed arrives, keep the known
-            // complete root visible and update it in place.
-            let d = raw.dirty.as_ref().unwrap();
-            seq.push_str(&format!(
-                "\x1b_Ga=f,i={},r={},f={},t={},S={},x={},y={},s={},v={},X=1,q=2{transient};{}\x1b\\",
-                DISPLAY_IMAGE_ID, ROOT_FRAME, kitty_format, transfer_code, raw.byte_length,
-                d.x, d.y, d.width, d.height, payload,
-            ));
         } else {
-            // Build the next complete frame off-screen and only then select it.
-            // Synchronized output prevents an intermediate state from painting.
-            let target = if self.current_frame == ROOT_FRAME { STAGING_FRAME } else { ROOT_FRAME };
+            // Update the visible animation frame in place. The previous
+            // two-frame pipeline copied the complete texture before every
+            // update, making small dirty rectangles scale with the full browser
+            // surface in Kitty. Synchronized output keeps the command atomic
+            // without allocating or composing a staging frame.
             seq.push_str(SYNC_BEGIN);
-
-            if self.has_staging_frame {
+            if let Some(d) = raw.dirty {
                 seq.push_str(&format!(
-                    "\x1b_Ga=c,i={},r={},c={},w={},h={},C=1,q=2;\x1b\\",
-                    DISPLAY_IMAGE_ID, self.current_frame, target, raw.width, raw.height,
+                    "\x1b_Ga=f,i={},r={},f={},t={},S={},x={},y={},s={},v={},X=1,q=2{transient};{}\x1b\\",
+                    DISPLAY_IMAGE_ID, ROOT_FRAME, kitty_format, transfer_code, raw.byte_length,
+                    d.x, d.y, d.width, d.height, payload,
+                ));
+            } else {
+                seq.push_str(&format!(
+                    "\x1b_Ga=f,i={},r={},f={},t={},S={},s={},v={},X=1,q=2{transient};{}\x1b\\",
+                    DISPLAY_IMAGE_ID, ROOT_FRAME, kitty_format, transfer_code, raw.byte_length,
+                    raw.width, raw.height, payload,
                 ));
             }
-
-            if let Some(d) = raw.dirty {
-                let base = if self.has_staging_frame {
-                    format!("r={target}")
-                } else {
-                    format!("c={}", self.current_frame)
-                };
-                seq.push_str(&format!(
-                    "\x1b_Ga=f,i={}, {},f={},t={},S={},x={},y={},s={},v={},X=1,q=2{transient};{}\x1b\\",
-                    DISPLAY_IMAGE_ID, base, kitty_format, transfer_code, raw.byte_length,
-                    d.x, d.y, d.width, d.height, payload,
-                ).replace(", ", ","));
-            } else {
-                let base = if self.has_staging_frame {
-                    format!("r={target}")
-                } else {
-                    format!("c={}", self.current_frame)
-                };
-                seq.push_str(&format!(
-                    "\x1b_Ga=f,i={}, {},f={},t={},S={},s={},v={},X=1,q=2{transient};{}\x1b\\",
-                    DISPLAY_IMAGE_ID, base, kitty_format, transfer_code, raw.byte_length,
-                    raw.width, raw.height, payload,
-                ).replace(", ", ","));
-            }
-
-            seq.push_str(&format!("\x1b_Ga=a,i={},c={},q=2;\x1b\\", DISPLAY_IMAGE_ID, target));
             seq.push_str(SYNC_END);
-            self.current_frame = target;
-            self.has_staging_frame = true;
         }
 
         out.write_all(seq.as_bytes()).context("write kitty graphics sequence")?;
@@ -240,8 +202,6 @@ impl Runtime {
 
     fn delete_raw_images<W: Write>(&mut self, out: &mut W) -> Result<()> {
         self.raw_initialized = false;
-        self.current_frame = ROOT_FRAME;
-        self.has_staging_frame = false;
         self.last_source_key.clear();
         for id in &self.cleanup_image_ids {
             write!(out, "\x1b_Ga=d,i={id},q=2;\x1b\\")?;
@@ -286,53 +246,26 @@ mod tests {
     }
 
     #[test]
-    fn file_deltas_are_staged_and_swapped_atomically() {
+    fn file_updates_modify_the_visible_frame_without_staging_copies() {
         let mut runtime = Runtime { cleanup_image_ids: vec![], ..Runtime::default() };
         let mut output = Vec::new();
         runtime.draw_file(&mut output, raw(None), place()).unwrap();
-        output.clear();
 
-        runtime.draw_file(
-            &mut output,
-            raw(Some(DirtyRect { x: 1, y: 0, width: 1, height: 1 })),
-            place(),
-        ).unwrap();
-        let first = String::from_utf8(output.clone()).unwrap();
-        assert!(!first.contains(SYNC_BEGIN));
-        assert!(first.contains("a=f,i=200,r=1"));
-        assert!(!first.contains("a=a,i=200,c=2"));
+        for dirty in [
+            Some(DirtyRect { x: 1, y: 0, width: 1, height: 1 }),
+            None,
+            Some(DirtyRect { x: 0, y: 1, width: 1, height: 1 }),
+        ] {
+            output.clear();
+            runtime.draw_file(&mut output, raw(dirty), place()).unwrap();
+            let update = String::from_utf8(output.clone()).unwrap();
 
-        // A full frame safely seeds the hidden frame even when background-copy
-        // semantics differ between Kitty versions.
-        output.clear();
-        runtime.draw_file(&mut output, raw(None), place()).unwrap();
-        let seed = String::from_utf8(output.clone()).unwrap();
-        assert!(seed.starts_with(SYNC_BEGIN));
-        assert!(seed.contains("a=f,i=200,c=1"));
-        assert!(seed.contains("a=a,i=200,c=2"));
-        assert!(seed.ends_with(SYNC_END));
-
-        output.clear();
-        runtime.draw_file(
-            &mut output,
-            raw(Some(DirtyRect { x: 0, y: 1, width: 1, height: 1 })),
-            place(),
-        ).unwrap();
-        let second = String::from_utf8(output.clone()).unwrap();
-        assert!(second.contains("a=c,i=200,r=2,c=1,w=2,h=2,C=1"));
-        assert!(second.contains("a=f,i=200,r=1"));
-        assert!(second.contains("a=a,i=200,c=1"));
-
-        output.clear();
-        runtime.draw_file(
-            &mut output,
-            raw(Some(DirtyRect { x: 1, y: 1, width: 1, height: 1 })),
-            place(),
-        ).unwrap();
-        let third = String::from_utf8(output).unwrap();
-        assert!(third.contains("a=c,i=200,r=1,c=2,w=2,h=2,C=1"));
-        assert!(third.contains("a=f,i=200,r=2"));
-        assert!(third.contains("a=a,i=200,c=2"));
+            assert!(update.starts_with(SYNC_BEGIN));
+            assert!(update.contains("a=f,i=200,r=1"));
+            assert!(!update.contains("a=c"));
+            assert!(!update.contains("a=a"));
+            assert!(update.ends_with(SYNC_END));
+        }
     }
 
 }
