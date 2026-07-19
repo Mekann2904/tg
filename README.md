@@ -86,7 +86,9 @@ transient hint or frames will be silently dropped:
 KITTY_WEBVIEW_TRANSIENT_HINT=0 bun run src/main.ts https://example.com
 ```
 
-Other knobs: `KITTY_WEBVIEW_PIXEL_FORMAT` (`rgb` default),
+Other knobs: `KITTY_WEBVIEW_PIXEL_FORMAT` (`rgba` default; use `rgb` to
+force the 24-bit path, which costs less bandwidth but triggers a CPU
+RGB24→ARGB8 expansion on Apple Silicon),
 `KITTY_WEBVIEW_PIXEL_DIFF` (on by default).
 
 ## Layout
