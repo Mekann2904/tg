@@ -651,6 +651,13 @@ void ForcePaint() {
   g_browser->GetHost()->Invalidate(PET_VIEW);
 }
 
+void ApplyPageZoom() {
+  if (!g_browser || !g_state || g_state->zoom_factor <= 0) return;
+  // Chromium stores zoom per origin. The initial about:blank zoom does not
+  // reliably carry over when the target origin loads, so reapply on load.
+  g_browser->GetHost()->SetZoomLevel(std::log(g_state->zoom_factor) / std::log(1.2));
+}
+
 constexpr int64_t kRecoveryPaintIntervalMs = 100;
 
 int64_t nowMs();
@@ -1734,6 +1741,14 @@ class KittyCefClient : public CefClient,
     screen_info.is_monochrome = false;
     screen_info.rect = CefRect(0, 0, width, height);
     screen_info.available_rect = screen_info.rect;
+    if (state_->debug) {
+      std::fprintf(stderr, "[cef] screen info dpr=%.3f dip=%dx%d expectedPixels=%dx%d\n",
+                   state_->dpr,
+                   width,
+                   height,
+                   static_cast<int>(std::lround(width * state_->dpr)),
+                   static_cast<int>(std::lround(height * state_->dpr)));
+    }
     return true;
   }
 
@@ -1874,10 +1889,7 @@ class KittyCefClient : public CefClient,
       browser->GetHost()->SetAccessibilityState(STATE_ENABLED);
     }
 
-    if (state_->zoom_factor > 0 && state_->zoom_factor != 1.0) {
-      // Chromium zoom level is log base 1.2 of the desired factor.
-      browser->GetHost()->SetZoomLevel(std::log(state_->zoom_factor) / std::log(1.2));
-    }
+    ApplyPageZoom();
     StartStdinReader();
     std::fprintf(stderr, "[cef] browser created fps=%d zoom=%.3f initialSize=%dx%d\n",
                  state_->fps, state_->zoom_factor, state_->view_w.load(), state_->view_h.load());
@@ -1929,7 +1941,8 @@ class KittyCefClient : public CefClient,
 
   void OnLoadEnd(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, int) override {
     if (frame->IsMain()) {
-      std::fprintf(stderr, "[cef] page loaded\n");
+      ApplyPageZoom();
+      std::fprintf(stderr, "[cef] page loaded zoom=%.3f\n", state_->zoom_factor);
       if (enableMessageRouterLayer()) InstallSemanticBridge();
       ForcePaint();
       CefPostDelayedTask(TID_UI, new ForcePaintUntilFirstFrameTask(10), 50);
@@ -2003,7 +2016,6 @@ class KittyCefApp : public CefApp, public CefBrowserProcessHandler, public CefRe
     command_line->AppendSwitch("no-sandbox");
     command_line->AppendSwitch("disable-renderer-backgrounding");
     command_line->AppendSwitch("disable-background-timer-throttling");
-    command_line->AppendSwitchWithValue("force-device-scale-factor", std::to_string(state_->dpr));
     command_line->AppendSwitchWithValue("touch-events", "disabled");
     command_line->AppendSwitch("disable-pinch");
     command_line->AppendSwitch("disable-touch-drag-drop");
