@@ -43,6 +43,7 @@ export class App {
     let wheelFlushTimer: Timer | undefined;
     let resizeDebounceTimer: Timer | undefined;
     debugLog(this.config.debug, `[app] debug log path=${DEBUG_LOG_PATH}`);
+    debugLog(this.config.debug, `[app] frame config fps=${this.config.fps} captureFps=${this.config.captureFps ?? this.config.fps} siteProfile=${this.config.siteProfile}`);
 
     const enqueueBrowserOperation = (name: string, fn: () => Promise<void>) => {
       browserQueue = browserQueue
@@ -71,7 +72,9 @@ export class App {
             frameSource.clear();
             const next = viewport.resize(nextSize, dpr);
             if (next.width > 0 && next.height > 0) {
-              frameSource.setExpectedSize(next.width, next.height);
+              // Frame generation already rejects pre-resize paints. Do not
+              // reject by dimensions here: HiDPI CEF builds may report either
+              // DIP or backing-pixel OnPaint dimensions during scale changes.
               await webview.resize(next.width, next.height);
             }
           }
@@ -102,7 +105,9 @@ export class App {
       dpr = await webview.devicePixelRatio();
       const initialTerminalSize = await terminal.currentSize();
       const initialBrowserSize = viewport.resize(initialTerminalSize, dpr);
-      frameSource.setExpectedSize(initialBrowserSize.width, initialBrowserSize.height);
+      // Accept CEF's first OnPaint dimensions as authoritative. Depending on
+      // CEF/macOS version this can transition from DIP to backing pixels after
+      // screen info is applied; the Kitty placement scales either form.
       debugLog(this.config.debug, `[app] terminal=${JSON.stringify(initialTerminalSize)} dpr=${dpr} browser=${JSON.stringify(initialBrowserSize)} placement=${JSON.stringify(viewport.placement())}`);
 
       await webview.open(initialBrowserSize);

@@ -120,6 +120,11 @@ export function parseConfig(args: string[]): Config {
     config.captureFps = Math.min(config.fps, 30);
   }
 
+  // Normalize the effective value here instead of leaving downstream code to
+  // interpret undefined. Explicit and default --capture-fps=60 now produce an
+  // identical Config object and an identical helper launch specification.
+  config.captureFps ??= config.fps;
+
   return config;
 }
 

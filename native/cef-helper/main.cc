@@ -1720,7 +1720,21 @@ class KittyCefClient : public CefClient,
   }
 
   void GetViewRect(CefRefPtr<CefBrowser>, CefRect& rect) override {
+    // CEF render-handler geometry is expressed in DIPs. OnPaint dimensions
+    // are scaled to physical pixels using GetScreenInfo().device_scale_factor.
     rect = CefRect(0, 0, state_->view_w.load(), state_->view_h.load());
+  }
+
+  bool GetScreenInfo(CefRefPtr<CefBrowser>, CefScreenInfo& screen_info) override {
+    const int width = state_->view_w.load();
+    const int height = state_->view_h.load();
+    screen_info.device_scale_factor = static_cast<float>(state_->dpr);
+    screen_info.depth = 24;
+    screen_info.depth_per_component = 8;
+    screen_info.is_monochrome = false;
+    screen_info.rect = CefRect(0, 0, width, height);
+    screen_info.available_rect = screen_info.rect;
+    return true;
   }
 
   void OnPaint(CefRefPtr<CefBrowser>, PaintElementType type, const RectList& dirty_rects,
@@ -1730,16 +1744,18 @@ class KittyCefClient : public CefClient,
     // Do not silently drop the first OSR frame. Some CEF/macOS configurations
     // first paint at a slightly different backing size before settling. If we
     // drop that frame, Kitty stays blank and no later paint may be scheduled.
+    const int expected_pixel_width = static_cast<int>(std::lround(state_->view_w.load() * state_->dpr));
+    const int expected_pixel_height = static_cast<int>(std::lround(state_->view_h.load() * state_->dpr));
     const bool size_mismatch =
-      std::abs(width - state_->view_w.load()) > 2 ||
-      std::abs(height - state_->view_h.load()) > 2;
+      std::abs(width - expected_pixel_width) > 2 ||
+      std::abs(height - expected_pixel_height) > 2;
     if (size_mismatch && state_->debug) {
       std::fprintf(stderr,
         "[cef] accepting size-mismatched paint source=%dx%d expected=%dx%d\n",
         width,
         height,
-        state_->view_w.load(),
-        state_->view_h.load());
+        expected_pixel_width,
+        expected_pixel_height);
     }
 
     const bool first_paint = !g_first_paint_seen.exchange(true);
@@ -1851,6 +1867,7 @@ class KittyCefClient : public CefClient,
     g_browser = browser;
     g_browser_created.store(true);
     browser->GetHost()->SetWindowlessFrameRate(state_->fps);
+    browser->GetHost()->NotifyScreenInfoChanged();
     browser->GetHost()->SetFocus(true);
 
     if (enableAccessibilityLayer()) {

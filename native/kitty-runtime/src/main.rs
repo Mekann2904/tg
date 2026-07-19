@@ -3,6 +3,8 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Deserialize;
 use std::io::{self, BufRead, BufReader, Write};
 
+mod display_scale;
+
 const DISPLAY_IMAGE_ID: u32 = 200;
 const PLACEMENT_ID: u32 = 1;
 const ROOT_FRAME: u32 = 1;
@@ -78,6 +80,14 @@ fn write_packet<W: Write>(out: &mut W, payload: &[u8]) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--display-scale") {
+        let window_id = args.get(2).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+        let scale = display_scale::for_window(window_id).unwrap_or(1.0);
+        println!("{scale}");
+        return Ok(());
+    }
+
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin.lock());
     let mut stdout = io::stdout().lock();

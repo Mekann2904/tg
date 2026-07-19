@@ -4,6 +4,7 @@ import { connect, type Socket } from "node:net";
 import type { BrowserCursorShape, BrowserHitTest, BrowserSize, Config, KeyModifiers, MouseButton } from "./types";
 import type { InboundFrame } from "./frame-source";
 import { debugLog, writeDebugBytes } from "./debug";
+import { resolveSystemDpr } from "./system-dpr";
 
 export interface HelperSpawnContext {
   url: string;
@@ -69,12 +70,7 @@ export class HelperProcessBrowserController {
   }
 
   private resolveDpr(): number {
-    const env = Number(process.env[this.options.dprEnvName] || "");
-    if (Number.isFinite(env) && env > 0 && env <= 4) return env;
-    // The offscreen browser CSS size is already set to the terminal's physical
-    // pixel size. Returning 2 on Retina would produce a 2x oversized bitmap,
-    // quadrupling bytes/frame and forcing Kitty to downscale it.
-    return 1;
+    return resolveSystemDpr(process.env[this.options.dprEnvName]);
   }
 
   async open(initialSize?: BrowserSize) {
@@ -86,8 +82,8 @@ export class HelperProcessBrowserController {
     const captureFps = this.config.captureFps ?? this.config.fps;
     const width = initialSize?.width || 1280;
     const height = initialSize?.height || 800;
-    this.expectedFrameWidth = width;
-    this.expectedFrameHeight = height;
+    this.expectedFrameWidth = Math.round(width * this.dpr);
+    this.expectedFrameHeight = Math.round(height * this.dpr);
     this.expectedFrameGeneration = 0;
     const spec = this.options.spawn({ 
       url,
@@ -240,9 +236,11 @@ export class HelperProcessBrowserController {
   async resize(width: number, height: number) {
     const nextWidth = Math.round(width);
     const nextHeight = Math.round(height);
-    if (nextWidth !== this.expectedFrameWidth || nextHeight !== this.expectedFrameHeight) {
-      this.expectedFrameWidth = nextWidth;
-      this.expectedFrameHeight = nextHeight;
+    const nextFrameWidth = Math.round(nextWidth * this.dpr);
+    const nextFrameHeight = Math.round(nextHeight * this.dpr);
+    if (nextFrameWidth !== this.expectedFrameWidth || nextFrameHeight !== this.expectedFrameHeight) {
+      this.expectedFrameWidth = nextFrameWidth;
+      this.expectedFrameHeight = nextFrameHeight;
       this.expectedFrameGeneration++;
     }
     this.send({ type: "resize", width: nextWidth, height: nextHeight });

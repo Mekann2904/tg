@@ -80,17 +80,17 @@ export class ViewportMapper {
     const terminalPixelWidth = size.pixelWidth ?? Math.round(size.cols * estimatedCellWidth);
     const terminalPixelHeight = size.pixelHeight ?? Math.round(size.rows * estimatedCellHeight);
 
-    // Use terminal physical pixels as browser CSS size for 1:1 bitmap→Kitty mapping.
-    // Retina displays need full physical resolution; CEF offscreen paint always
-    // produces CSS-resolution bitmaps, so CSS must match the target physical size.
-    const cssWidth = Math.round(terminalPixelWidth * this.config.viewportScale * this.config.displayScale);
-    const cssHeight = Math.round(terminalPixelHeight * this.config.viewportScale * this.config.displayScale);
+    // CEF view dimensions are CSS pixels (DIPs); OnPaint multiplies them by
+    // devicePixelRatio to produce the physical bitmap consumed by Kitty.
+    const dpr = Math.max(0.5, devicePixelRatio);
+    const cssWidth = Math.round((terminalPixelWidth / dpr) * this.config.viewportScale * this.config.displayScale);
+    const cssHeight = Math.round((terminalPixelHeight / dpr) * this.config.viewportScale * this.config.displayScale);
 
     const fitted = fitInside(
       this.config.width ?? cssWidth,
       this.config.height ?? cssHeight,
-      this.config.maxWidth || terminalPixelWidth,
-      this.config.maxHeight || terminalPixelHeight,
+      this.config.maxWidth || cssWidth,
+      this.config.maxHeight || cssHeight,
     );
 
     this.browser = fitted;
