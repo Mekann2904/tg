@@ -124,6 +124,9 @@ export class App {
       ctrl.onHitTest = (hit: import("./types").BrowserHitTest) => {
         terminal.setHitTest(hit);
       };
+      // Any controller death (socket error, helper exit, malformed header)
+      // routes through fatal() → here → the normal finally block (terminal.leave).
+      ctrl.onFatal = () => terminal.requestExit();
 
       pump.onRender(async () => {
         if (resizeInProgress) return;
