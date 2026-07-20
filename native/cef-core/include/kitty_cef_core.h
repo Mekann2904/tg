@@ -22,11 +22,8 @@ struct KittyCoreFrameMeta {
   uint64_t seq;
   uint32_t width;
   uint32_t height;
-  uint32_t stride;
   size_t   byte_len;
   const char* path_ptr;
-  const char* transfer_ptr; /* "file", "shm", or "direct" */
-  const uint8_t* data_ptr;  /* valid only when transfer_ptr == "direct" */
   uint32_t dirty_valid;
   uint32_t dirty_x;
   uint32_t dirty_y;

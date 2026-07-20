@@ -31,7 +31,7 @@ _Avoid_: Unsafe protocol, blocked origin
 
 **FramePump**: The render loop scheduler that drives frame capture from CEF and Kitty Graphics Protocol output. Operates in hybrid mode (fixed-rate terminal updates driven by paint/input/resize dirty flags).
 
-**Dirty rect / frame delta**: The rectangle of pixels that changed since the previous frame. CEF computes it by pixel-diffing the new frame against the previous one (with an area threshold). Only the dirty rectangle is transmitted, using the Kitty animation protocol (`a=f` scratch frame composited into a stable root frame via `a=c`), instead of re-sending the full framebuffer every paint.
+**Dirty rect / frame delta**: The rectangle of pixels that changed since the previous frame. It is an opt-in performance mode controlled by `KITTY_WEBVIEW_DIRTY_THRESHOLD_PERCENT`; full frames are the default because partial Kitty animation-frame updates can briefly corrupt rectangular regions.
 
 ## Example dialogue
 

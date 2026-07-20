@@ -4,8 +4,7 @@ import { connect, type Socket } from "node:net";
 import type { BrowserCursorShape, BrowserHitTest, BrowserSize, Config, KeyModifiers, MouseButton } from "./types";
 import type { InboundFrame } from "./frame-source";
 import { debugLog, writeDebugBytes } from "./debug";
-
-const EMPTY_FRAME_DATA = Buffer.alloc(0);
+import { resolveSystemDpr } from "./system-dpr";
 
 export interface HelperSpawnContext {
   url: string;
@@ -39,7 +38,6 @@ export class HelperProcessBrowserController {
   private sock?: Socket;
   private frameWidth = 0;
   private frameHeight = 0;
-  private frameStride = 0;
   private expectedFrameWidth = 0;
   private expectedFrameHeight = 0;
   private expectedFrameGeneration = 0;
@@ -71,12 +69,7 @@ export class HelperProcessBrowserController {
   }
 
   private resolveDpr(): number {
-    const env = Number(process.env[this.options.dprEnvName] || "");
-    if (Number.isFinite(env) && env > 0 && env <= 4) return env;
-    // The offscreen browser CSS size is already set to the terminal's physical
-    // pixel size. Returning 2 on Retina would produce a 2x oversized bitmap,
-    // quadrupling bytes/frame and forcing Kitty to downscale it.
-    return 1;
+    return resolveSystemDpr(process.env[this.options.dprEnvName]);
   }
 
   async open(initialSize?: BrowserSize) {
@@ -88,8 +81,8 @@ export class HelperProcessBrowserController {
     const captureFps = this.config.captureFps ?? this.config.fps;
     const width = initialSize?.width || 1280;
     const height = initialSize?.height || 800;
-    this.expectedFrameWidth = width;
-    this.expectedFrameHeight = height;
+    this.expectedFrameWidth = Math.round(width * this.dpr);
+    this.expectedFrameHeight = Math.round(height * this.dpr);
     this.expectedFrameGeneration = 0;
     const spec = this.options.spawn({ 
       url,
@@ -217,11 +210,6 @@ export class HelperProcessBrowserController {
   }
   async type(text: string) { this.send({ type: "text", text }); }
   async press(key: string, modifiers?: KeyModifiers) { this.send({ type: "key", key, modifiers }); }
-  async scroll(dx: number, dy: number) {
-    // Wheel target: center of the viewport in CSS pixels.
-    // frameWidth/Height already equals browser CSS size (terminal physical pixels).
-    await this.wheel(Math.round(this.frameWidth / 2), Math.round(this.frameHeight / 2), dx, dy);
-  }
 
   private nextClickCount(x: number, y: number, button: MouseButton): number {
     const now = performance.now();
@@ -242,9 +230,11 @@ export class HelperProcessBrowserController {
   async resize(width: number, height: number) {
     const nextWidth = Math.round(width);
     const nextHeight = Math.round(height);
-    if (nextWidth !== this.expectedFrameWidth || nextHeight !== this.expectedFrameHeight) {
-      this.expectedFrameWidth = nextWidth;
-      this.expectedFrameHeight = nextHeight;
+    const nextFrameWidth = Math.round(nextWidth * this.dpr);
+    const nextFrameHeight = Math.round(nextHeight * this.dpr);
+    if (nextFrameWidth !== this.expectedFrameWidth || nextFrameHeight !== this.expectedFrameHeight) {
+      this.expectedFrameWidth = nextFrameWidth;
+      this.expectedFrameHeight = nextFrameHeight;
       this.expectedFrameGeneration++;
     }
     this.send({ type: "resize", width: nextWidth, height: nextHeight });
@@ -264,7 +254,7 @@ export class HelperProcessBrowserController {
     // Dirty frames depend on their predecessor, so newest-only sampling here
     // would permanently lose changed regions. Avoid Buffer.concat(): raw frames
     // can be several MB and repeated concatenation creates excessive copying.
-    const completeFrames: { hdr: any; data: Buffer }[] = [];
+    const completeFrames: { hdr: any }[] = [];
 
     while (this.bufferedBytes >= 4) {
       const hdrLenBuf = this.peekBytes(4);
@@ -331,42 +321,15 @@ export class HelperProcessBrowserController {
         // Waiting for those bytes makes every file frame one message late and
         // a static first paint can time out until another paint/resize arrives.
         this.skipBytes(headerEnd);
-        completeFrames.push({ hdr, data: EMPTY_FRAME_DATA });
+        completeFrames.push({ hdr });
         continue;
       }
 
-      if (hdr.type !== "frame" || typeof hdr.byteLength !== "number") {
-        this.skipBytes(headerEnd);
-        continue;
-      }
-
-      if (this.bufferedBytes < headerEnd + 4) break;
-      const dataLenBuf = this.peekBytes(4, headerEnd);
-      if (!dataLenBuf) break;
-
-      const dataLen = dataLenBuf.readUInt32LE(0);
-      const totalLen = headerEnd + 4 + dataLen;
-
-      if (dataLen !== hdr.byteLength) {
-        // Frame metadata and payload length disagree. Drop this header and resync.
-        this.skipBytes(headerEnd);
-        continue;
-      }
-
-      if (this.bufferedBytes < totalLen) break;
-
-      // Consume header + data length prefix.
-      this.skipBytes(headerEnd + 4);
-
-      // Read the raw frame. This is zero-copy if the frame body is contained in
-      // one TCP chunk, and one-copy only when it spans multiple chunks.
-      const frameData = this.readBytes(dataLen);
-      if (!frameData) break;
-
-      completeFrames.push({ hdr, data: frameData });
+      // Unrecognized header-only message type; skip and resync.
+      this.skipBytes(headerEnd);
     }
 
-    for (const { hdr, data } of completeFrames) {
+    for (const { hdr } of completeFrames) {
       const generation = Number(hdr.generation) || 0;
       if (generation !== this.expectedFrameGeneration) {
         const seq = Number(hdr.seq) || undefined;
@@ -379,17 +342,18 @@ export class HelperProcessBrowserController {
 
       this.frameWidth = hdr.width;
       this.frameHeight = hdr.height;
-      this.frameStride = hdr.stride || hdr.width * (hdr.format === "rgb" ? 3 : 4);
       const format = hdr.format === "rgb" ? "rgb" : "rgba";
-      const transfer = hdr.transfer === "shm" ? "shm" : hdr.transfer === "direct" ? "direct" : "file";
 
-      const frame: InboundFrame = hdr.type === "frameFile"
-        ? { seq: Number(hdr.seq) || undefined, path: hdr.path, byteLength: hdr.byteLength, width: this.frameWidth, height: this.frameHeight, format, transfer, dirty: hdr.dirty }
-        : { seq: Number(hdr.seq) || undefined, data, byteLength: data.length, width: this.frameWidth, height: this.frameHeight, format, transfer, dirty: hdr.dirty };
+      const frame: InboundFrame = {
+        seq: Number(hdr.seq) || undefined,
+        path: hdr.path,
+        byteLength: hdr.byteLength,
+        width: this.frameWidth,
+        height: this.frameHeight,
+        format,
+        dirty: hdr.dirty,
+      };
 
-      if (this.config.debug && transfer === "direct" && (hdr.seq <= 2 || process.env.KITTY_WEB_UI_DIRECT_DEBUG === "1")) {
-        this.log(`${this.logPrefix} direct frame received seq=${hdr.seq} bytes=${data.length} ${hdr.width}x${hdr.height}`);
-      }
       if (hdr.seq <= 2) {
         this.log(`${this.logPrefix} frame ${hdr.seq} ${hdr.width}x${hdr.height} dpr=${this.dpr}`);
       }
@@ -500,46 +464,6 @@ export class HelperProcessBrowserController {
     }
   }
 
-  private readBytes(length: number): Buffer | null {
-    if (this.bufferedBytes < length) return null;
-    if (length === 0) return Buffer.alloc(0);
-
-    const first = this.chunks[0];
-
-    if (first.length === length) {
-      this.chunks.shift();
-      this.bufferedBytes -= length;
-      return first;
-    }
-
-    if (first.length > length) {
-      const out = first.subarray(0, length);
-      this.chunks[0] = first.subarray(length);
-      this.bufferedBytes -= length;
-      return out;
-    }
-
-    const out = Buffer.allocUnsafe(length);
-    let copied = 0;
-
-    while (copied < length && this.chunks.length > 0) {
-      const chunk = this.chunks[0];
-      const take = Math.min(chunk.length, length - copied);
-
-      chunk.copy(out, copied, 0, take);
-
-      copied += take;
-      this.bufferedBytes -= take;
-
-      if (take === chunk.length) {
-        this.chunks.shift();
-      } else {
-        this.chunks[0] = chunk.subarray(take);
-      }
-    }
-
-    return out;
-  }
 }
 
 function normalizeCursorShape(value: unknown): BrowserCursorShape {

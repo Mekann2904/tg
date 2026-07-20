@@ -40,7 +40,7 @@
 #include <vector>
 
 #if defined(_WIN32)
-#error "This starter helper intentionally implements the POSIX transport path only. Port FrameServer/RawSlots to Win32 before building on Windows."
+#error "This starter helper intentionally implements the POSIX transport path only. Port FrameServer to Win32 before building on Windows."
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <limits.h>
@@ -222,14 +222,6 @@ std::string defaultDesktopUserAgent() {
   return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
          "AppleWebKit/537.36 (KHTML, like Gecko) "
          "Chrome/120.0.0.0 Safari/537.36";
-}
-
-std::string defaultRawDirBase() {
-  const char* env = std::getenv("KITTY_WEBVIEW_RAW_DIR");
-  if (env && *env) return env;
-  if (::access("/dev/shm", W_OK | X_OK) == 0) return "/dev/shm";
-  const char* tmp = std::getenv("TMPDIR");
-  return tmp && *tmp ? tmp : "/tmp";
 }
 
 bool mkdirOne(const std::string& path) {
@@ -486,31 +478,6 @@ class FrameServer {
     return writeAll(fd, prefix, sizeof(prefix)) && writeAll(fd, header.data(), header.size());
   }
 
-  bool SendFrame(std::string header, const void* data, size_t data_len) {
-    int fd = client_fd_.load();
-    if (fd < 0) return false;
-    while ((header.size() & 3) != 0) header.push_back(' ');
-    uint32_t header_len = static_cast<uint32_t>(header.size());
-    uint8_t header_prefix[4] = {
-      static_cast<uint8_t>(header_len & 0xff),
-      static_cast<uint8_t>((header_len >> 8) & 0xff),
-      static_cast<uint8_t>((header_len >> 16) & 0xff),
-      static_cast<uint8_t>((header_len >> 24) & 0xff),
-    };
-    uint32_t body_len = static_cast<uint32_t>(data_len);
-    uint8_t body_prefix[4] = {
-      static_cast<uint8_t>(body_len & 0xff),
-      static_cast<uint8_t>((body_len >> 8) & 0xff),
-      static_cast<uint8_t>((body_len >> 16) & 0xff),
-      static_cast<uint8_t>((body_len >> 24) & 0xff),
-    };
-    std::lock_guard<std::mutex> lock(write_mu_);
-    return writeAll(fd, header_prefix, sizeof(header_prefix)) &&
-           writeAll(fd, header.data(), header.size()) &&
-           writeAll(fd, body_prefix, sizeof(body_prefix)) &&
-           writeAll(fd, data, data_len);
-  }
-
  private:
   void AcceptOnce() {
     int lfd = listen_fd_.load();
@@ -545,58 +512,6 @@ class FrameServer {
   std::mutex write_mu_;
 };
 
-class RawSlots {
- public:
-  RawSlots() {
-    int slots = 2;
-    if (const char* env = std::getenv("KITTY_WEBVIEW_RAW_SLOTS")) slots = clampInt(std::atoi(env), 2, 16);
-    const std::string base = defaultRawDirBase();
-    std::string tmpl = base + "/kitty-webview-cef-" + std::to_string(getpid()) + "-XXXXXX";
-    std::vector<char> buf(tmpl.begin(), tmpl.end());
-    buf.push_back('\0');
-    char* made = ::mkdtemp(buf.data());
-    dir_ = made ? made : base;
-
-    for (int i = 0; i < slots; ++i) {
-      std::string p = dir_ + "/" + std::to_string(i) + ".rgba";
-      int fd = ::open(p.c_str(), O_CREAT | O_RDWR | O_TRUNC, 0600);
-      if (fd >= 0) {
-        paths_.push_back(p);
-        fds_.push_back(fd);
-      }
-    }
-  }
-
-  ~RawSlots() { Cleanup(); }
-
-  std::string Write(const std::vector<uint8_t>& data) {
-    if (fds_.empty()) return "";
-    if (slot_size_ != data.size()) {
-      slot_size_ = data.size();
-      for (int fd : fds_) ::ftruncate(fd, static_cast<off_t>(slot_size_));
-      next_ = 0;
-    }
-    size_t slot = next_++ % fds_.size();
-    if (::pwrite(fds_[slot], data.data(), data.size(), 0) < 0) return "";
-    return paths_[slot];
-  }
-
-  void Cleanup() {
-    for (int fd : fds_) if (fd >= 0) ::close(fd);
-    for (const auto& p : paths_) ::unlink(p.c_str());
-    if (!dir_.empty()) ::rmdir(dir_.c_str());
-    fds_.clear();
-    paths_.clear();
-  }
-
- private:
-  std::string dir_;
-  std::vector<std::string> paths_;
-  std::vector<int> fds_;
-  size_t next_ = 0;
-  size_t slot_size_ = 0;
-};
-
 struct RuntimeState {
   std::atomic<int> view_w{1280};
   std::atomic<int> view_h{800};
@@ -621,6 +536,12 @@ struct RuntimeState {
   std::atomic<uint64_t> flow_dropped_frames{0};
   std::atomic<bool> missed_paint{false};
   std::atomic<bool> staging_seed_needed{true};
+  // UI-thread-only recovery throttle. Flow-control ACKs can arrive much faster
+  // than a large OSR surface can be captured and handed to Kitty. Coalesce
+  // recovery invalidations so ACK -> ForcePaint cannot become a CPU-saturating
+  // feedback loop.
+  int64_t last_recovery_paint_ms{0};
+  bool recovery_paint_scheduled{false};
 
   std::string initial_url;
   std::string site_profile;
@@ -643,6 +564,53 @@ void ForcePaint() {
   if (!g_browser) return;
   g_browser->GetHost()->WasResized();
   g_browser->GetHost()->Invalidate(PET_VIEW);
+}
+
+void ApplyPageZoom() {
+  if (!g_browser || !g_state || g_state->zoom_factor <= 0) return;
+  // Chromium stores zoom per origin. The initial about:blank zoom does not
+  // reliably carry over when the target origin loads, so reapply on load.
+  g_browser->GetHost()->SetZoomLevel(std::log(g_state->zoom_factor) / std::log(1.2));
+}
+
+constexpr int64_t kRecoveryPaintIntervalMs = 100;
+
+int64_t nowMs();
+
+class RecoveryPaintTask : public CefTask {
+ public:
+  void Execute() override {
+    CEF_REQUIRE_UI_THREAD();
+    if (!g_browser || !g_state) return;
+
+    g_state->recovery_paint_scheduled = false;
+    if (!g_state->missed_paint.load(std::memory_order_relaxed)) return;
+
+    g_state->last_recovery_paint_ms = nowMs();
+    ForcePaint();
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(RecoveryPaintTask);
+};
+
+void ScheduleRecoveryPaint() {
+  CEF_REQUIRE_UI_THREAD();
+  if (!g_browser || !g_state || g_state->recovery_paint_scheduled) return;
+
+  const int64_t elapsed = nowMs() - g_state->last_recovery_paint_ms;
+  if (elapsed >= kRecoveryPaintIntervalMs) {
+    g_state->last_recovery_paint_ms = nowMs();
+    ForcePaint();
+    return;
+  }
+
+  g_state->recovery_paint_scheduled = true;
+  CefPostDelayedTask(
+    TID_UI,
+    new RecoveryPaintTask(),
+    kRecoveryPaintIntervalMs - std::max<int64_t>(0, elapsed)
+  );
 }
 
 class ForcePaintUntilFirstFrameTask : public CefTask {
@@ -1436,10 +1404,10 @@ class CommandTask : public CefTask {
         kitty_core_force_full_frame(g_state->core);
         ForcePaint();
       } else if (g_state->missed_paint.load(std::memory_order_relaxed)) {
-        // Paints may have been coalesced while Kitty was busy. Invalidate after
-        // ACK so CEF supplies the latest complete buffer even if no new animation
-        // tick happens naturally.
-        ForcePaint();
+        // Paints may have been coalesced while Kitty was busy. Recover the
+        // latest complete buffer, but cap recovery invalidations at 10 Hz so a
+        // large surface cannot form an ACK -> ForcePaint CPU feedback loop.
+        ScheduleRecoveryPaint();
       }
       return;
     }
@@ -1674,7 +1642,29 @@ class KittyCefClient : public CefClient,
   }
 
   void GetViewRect(CefRefPtr<CefBrowser>, CefRect& rect) override {
+    // CEF render-handler geometry is expressed in DIPs. OnPaint dimensions
+    // are scaled to physical pixels using GetScreenInfo().device_scale_factor.
     rect = CefRect(0, 0, state_->view_w.load(), state_->view_h.load());
+  }
+
+  bool GetScreenInfo(CefRefPtr<CefBrowser>, CefScreenInfo& screen_info) override {
+    const int width = state_->view_w.load();
+    const int height = state_->view_h.load();
+    screen_info.device_scale_factor = static_cast<float>(state_->dpr);
+    screen_info.depth = 24;
+    screen_info.depth_per_component = 8;
+    screen_info.is_monochrome = false;
+    screen_info.rect = CefRect(0, 0, width, height);
+    screen_info.available_rect = screen_info.rect;
+    if (state_->debug) {
+      std::fprintf(stderr, "[cef] screen info dpr=%.3f dip=%dx%d expectedPixels=%dx%d\n",
+                   state_->dpr,
+                   width,
+                   height,
+                   static_cast<int>(std::lround(width * state_->dpr)),
+                   static_cast<int>(std::lround(height * state_->dpr)));
+    }
+    return true;
   }
 
   void OnPaint(CefRefPtr<CefBrowser>, PaintElementType type, const RectList& dirty_rects,
@@ -1684,16 +1674,18 @@ class KittyCefClient : public CefClient,
     // Do not silently drop the first OSR frame. Some CEF/macOS configurations
     // first paint at a slightly different backing size before settling. If we
     // drop that frame, Kitty stays blank and no later paint may be scheduled.
+    const int expected_pixel_width = static_cast<int>(std::lround(state_->view_w.load() * state_->dpr));
+    const int expected_pixel_height = static_cast<int>(std::lround(state_->view_h.load() * state_->dpr));
     const bool size_mismatch =
-      std::abs(width - state_->view_w.load()) > 2 ||
-      std::abs(height - state_->view_h.load()) > 2;
+      std::abs(width - expected_pixel_width) > 2 ||
+      std::abs(height - expected_pixel_height) > 2;
     if (size_mismatch && state_->debug) {
       std::fprintf(stderr,
         "[cef] accepting size-mismatched paint source=%dx%d expected=%dx%d\n",
         width,
         height,
-        state_->view_w.load(),
-        state_->view_h.load());
+        expected_pixel_width,
+        expected_pixel_height);
     }
 
     const bool first_paint = !g_first_paint_seen.exchange(true);
@@ -1751,17 +1743,13 @@ class KittyCefClient : public CefClient,
       return;
     }
 
-    const std::string transfer = meta.transfer_ptr ? meta.transfer_ptr : "file";
-
     std::ostringstream hdr;
-    hdr << "{\"type\":\"" << (transfer == "direct" ? "frame" : "frameFile") << "\""
+    hdr << "{\"type\":\"frameFile\""
         << ",\"seq\":" << meta.seq
         << ",\"generation\":" << state_->generation.load()
         << ",\"width\":" << meta.width
         << ",\"height\":" << meta.height
-        << ",\"stride\":" << meta.stride
         << ",\"format\":\"" << (state_->rgb ? "rgb" : "rgba") << "\""
-        << ",\"transfer\":\"" << jsonEscape(transfer) << "\""
         << ",\"byteLength\":" << meta.byte_len;
 
     if (meta.dirty_valid) {
@@ -1772,15 +1760,9 @@ class KittyCefClient : public CefClient,
           << "}";
     }
 
-    if (transfer == "direct") {
-      hdr << "}";
-      if (!meta.data_ptr || meta.byte_len == 0) return;
-      state_->server.SendFrame(hdr.str(), meta.data_ptr, meta.byte_len);
-    } else {
-      hdr << ",\"path\":\"" << jsonEscape(meta.path_ptr ? meta.path_ptr : "") << "\""
-          << "}";
-      state_->server.SendHeader(hdr.str());
-    }
+    hdr << ",\"path\":\"" << jsonEscape(meta.path_ptr ? meta.path_ptr : "") << "\""
+        << "}";
+    state_->server.SendHeader(hdr.str());
 
     state_->sent_frame_seq.store(meta.seq, std::memory_order_relaxed);
 
@@ -1790,7 +1772,7 @@ class KittyCefClient : public CefClient,
                    meta.width,
                    meta.height,
                    meta.byte_len,
-                   transfer.c_str(),
+                   "shm",
                    meta.dirty_valid ? meta.dirty_width : 0,
                    meta.dirty_valid ? meta.dirty_height : 0,
                    meta.dirty_valid ? meta.dirty_x : 0,
@@ -1814,16 +1796,14 @@ class KittyCefClient : public CefClient,
     g_browser = browser;
     g_browser_created.store(true);
     browser->GetHost()->SetWindowlessFrameRate(state_->fps);
+    browser->GetHost()->NotifyScreenInfoChanged();
     browser->GetHost()->SetFocus(true);
 
     if (enableAccessibilityLayer()) {
       browser->GetHost()->SetAccessibilityState(STATE_ENABLED);
     }
 
-    if (state_->zoom_factor > 0 && state_->zoom_factor != 1.0) {
-      // Chromium zoom level is log base 1.2 of the desired factor.
-      browser->GetHost()->SetZoomLevel(std::log(state_->zoom_factor) / std::log(1.2));
-    }
+    ApplyPageZoom();
     StartStdinReader();
     std::fprintf(stderr, "[cef] browser created fps=%d zoom=%.3f initialSize=%dx%d\n",
                  state_->fps, state_->zoom_factor, state_->view_w.load(), state_->view_h.load());
@@ -1875,7 +1855,8 @@ class KittyCefClient : public CefClient,
 
   void OnLoadEnd(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, int) override {
     if (frame->IsMain()) {
-      std::fprintf(stderr, "[cef] page loaded\n");
+      ApplyPageZoom();
+      std::fprintf(stderr, "[cef] page loaded zoom=%.3f\n", state_->zoom_factor);
       if (enableMessageRouterLayer()) InstallSemanticBridge();
       ForcePaint();
       CefPostDelayedTask(TID_UI, new ForcePaintUntilFirstFrameTask(10), 50);
@@ -1949,7 +1930,6 @@ class KittyCefApp : public CefApp, public CefBrowserProcessHandler, public CefRe
     command_line->AppendSwitch("no-sandbox");
     command_line->AppendSwitch("disable-renderer-backgrounding");
     command_line->AppendSwitch("disable-background-timer-throttling");
-    command_line->AppendSwitchWithValue("force-device-scale-factor", std::to_string(state_->dpr));
     command_line->AppendSwitchWithValue("touch-events", "disabled");
     command_line->AppendSwitch("disable-pinch");
     command_line->AppendSwitch("disable-touch-drag-drop");
@@ -2078,7 +2058,7 @@ int main(int argc, char** argv) {
   CefMainArgs main_args(argc, argv);
   CefRefPtr<KittyCefApp> app = new KittyCefApp(&state);
 
-  // Must happen before starting the browser-process-only TCP/file transport.
+  // Must happen before starting the browser-process-only TCP frame transport.
   // CEF subprocesses re-enter this executable with different argv.
   int exit_code = CefExecuteProcess(main_args, app, nullptr);
   std::fprintf(stderr, "[cef] CefExecuteProcess returned %d\n", exit_code);

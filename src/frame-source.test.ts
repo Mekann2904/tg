@@ -15,7 +15,7 @@ function makeDeps(opts: { backpressured?: boolean; onFrame?: () => void; onDrop?
 }
 
 function frame(seq: number, w = 100, h = 100, extra: Partial<InboundFrame> = {}): InboundFrame {
-  return { seq, byteLength: w * h * 4, width: w, height: h, ...extra };
+  return { seq, path: "/dev/shm/frame", byteLength: w * h * 4, width: w, height: h, ...extra };
 }
 
 test("dirty frames are delivered in order so every changed region is applied", () => {
@@ -118,12 +118,11 @@ test("file frame shape is preserved through next()", () => {
   const ctx = makeDeps();
   const fs = new FrameSource(ctx.deps);
   fs.setExpectedSize(100, 100);
-  fs.push(frame(1, 100, 100, { path: "/dev/shm/x", transfer: "shm", dirty: { x: 1, y: 2, width: 3, height: 4 } }));
+  fs.push(frame(1, 100, 100, { path: "/dev/shm/x", dirty: { x: 1, y: 2, width: 3, height: 4 } }));
   const got = fs.next();
-  expect(got?.kind).toBe("file");
-  if (got?.kind === "file") {
+  expect(got).not.toBeNull();
+  if (got) {
     expect(got.path).toBe("/dev/shm/x");
-    expect(got.transfer).toBe("shm");
     expect(got.dirty).toEqual({ x: 1, y: 2, width: 3, height: 4 });
   }
 });

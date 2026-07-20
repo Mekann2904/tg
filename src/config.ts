@@ -18,8 +18,6 @@ export const defaultConfig: Omit<Config, "url"> = {
   quitKeys: ["ctrl-c", "ctrl-q"],
   debug: false,
   cefControlPreset: undefined,
-  kittyRenderer: "auto",
-  nativeResolution: false,
 };
 
 export function parseConfig(args: string[]): Config {
@@ -76,9 +74,6 @@ export function parseConfig(args: string[]): Config {
       case "cef-control":
         config.cefControlPreset = enumValue(takeValue(), ["basic", "semantic", "devtools", "full"], key) as Config["cefControlPreset"];
         break;
-      case "kitty-renderer":
-        config.kittyRenderer = enumValue(takeValue(), ["auto", "ts", "rust"], key) as Config["kittyRenderer"];
-        break;
       case "no-alt-screen":
         config.useAltScreen = false;
         break;
@@ -99,9 +94,6 @@ export function parseConfig(args: string[]): Config {
         break;
       case "scroll-coalesce-ms":
         config.scrollCoalesceMs = parseNonNegativeInt(takeValue(), key);
-        break;
-      case "native":
-        config.nativeResolution = true;
         break;
       case "allow-http":
         config.allowHttp = true;
@@ -124,12 +116,17 @@ export function parseConfig(args: string[]): Config {
     config.captureFps = Math.min(config.fps, 30);
   }
 
+  // Normalize the effective value here instead of leaving downstream code to
+  // interpret undefined. Explicit and default --capture-fps=60 now produce an
+  // identical Config object and an identical helper launch specification.
+  config.captureFps ??= config.fps;
+
   return config;
 }
 
 function usage(): never {
   throw new Error(
-    "Usage: kitty-webview <url> [--cef-control=basic|semantic|devtools|full] [--kitty-renderer=auto|ts|rust] [--fps=60] [--capture-fps=N] [--site-profile=default|stable] [--width=N] [--height=N] [--scale=1] [--zoom=1] [--max-width=N] [--max-height=N] [--display-scale=1] [--resize-debounce=300] [--scroll-coalesce-ms=8] [--mouse-mode=sgr|sgr-pixel] [--no-alt-screen] [--quit-keys=ctrl-q] [--debug] [--native] [--user-agent=...]"
+    "Usage: kitty-webview <url> [--cef-control=basic|semantic|devtools|full] [--fps=60] [--capture-fps=N] [--site-profile=default|stable] [--width=N] [--height=N] [--scale=1] [--zoom=1] [--max-width=N] [--max-height=N] [--display-scale=1] [--resize-debounce=300] [--scroll-coalesce-ms=8] [--mouse-mode=sgr|sgr-pixel] [--no-alt-screen] [--quit-keys=ctrl-q] [--debug] [--user-agent=...]"
   );
 }
 

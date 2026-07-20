@@ -12,7 +12,6 @@ export interface BrowserController {
   wheel(x: number, y: number, deltaX: number, deltaY: number, modifiers?: import("./types").KeyModifiers): Promise<void>;
   type(text: string): Promise<void>;
   press(key: string, modifiers?: import("./types").KeyModifiers): Promise<void>;
-  scroll(deltaX: number, deltaY: number): Promise<void>;
   devicePixelRatio(): Promise<number>;
   applyPageZoom(): Promise<void>;
   resize(width: number, height: number): Promise<void>;

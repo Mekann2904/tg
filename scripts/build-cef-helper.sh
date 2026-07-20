@@ -42,7 +42,15 @@ fi
 
 # Step 3: Build kitty-cef-helper binary via CMake
 BUILD_DIR="$ROOT/native/cef-helper/build"
+BINARY="$BUILD_DIR/kitty-cef-helper"
 cmake -S "$ROOT/native/cef-helper" -B "$BUILD_DIR" -DCEF_ROOT="$CEF_ROOT" -DCEF_CORE_LIB="$CEF_CORE_LIB" -DCMAKE_BUILD_TYPE=Release
+
+# Older versions of this script replaced the CMake output with a convenience
+# shell wrapper. CMake then considered the target up to date on the next build,
+# causing that wrapper to be copied into the app bundle as its executable.
+if [[ -f "$BINARY" ]] && [[ "$(file -b "$BINARY")" == *"shell script"* ]]; then
+  rm -f "$BINARY"
+fi
 cmake --build "$BUILD_DIR" --config Release --target kitty-cef-helper
 
 # Step 3: Create macOS app bundle (required for CEF ICU data resolution)
@@ -164,14 +172,6 @@ if command -v codesign >/dev/null 2>&1 && [[ "${KITTY_WEB_UI_SKIP_CODESIGN:-0}" 
   codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || true
 fi
 
-# Now overwrite the cmake build output with a convenience wrapper script
-cat > "$BUILD_DIR/kitty-cef-helper" << 'WRAPPER'
-#!/usr/bin/env bash
-DIR="$(cd "$(dirname "$0")/.." && pwd)"
-exec "$DIR/kitty-cef-helper.app/Contents/MacOS/kitty-cef-helper" "$@"
-WRAPPER
-chmod +x "$BUILD_DIR/kitty-cef-helper"
-
-echo "$BUILD_DIR/kitty-cef-helper"
+echo "binary: $BUILD_DIR/kitty-cef-helper"
 echo "main app: $APP_DIR"
 echo "subprocess: $APP_FRAMEWORKS/$HELPER_NAME.app/Contents/MacOS/$HELPER_NAME"

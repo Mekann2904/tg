@@ -1,20 +1,3 @@
-use std::ffi::c_char;
-
-/// Frame metadata returned to C++ after a successful write.
-#[repr(C)]
-#[derive(Debug)]
-pub struct FrameMeta {
-    pub seq: u64,
-    pub generation: u32,
-    pub width: u32,
-    pub height: u32,
-    pub stride: u32,
-    pub byte_len: usize,
-    pub format: *const c_char,
-    pub path_ptr: *const u8,
-    pub path_len: usize,
-}
-
 /// Convert CEF BGRA buffer to RGBA or RGB.
 ///
 /// CEF produces pixels in BGRA order (blue, green, red, alpha).

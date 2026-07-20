@@ -101,7 +101,7 @@ function main() {
     const resolvedPerms = perms.includes("all") ? KNOWN_PERMISSIONS : perms;
 
     // Block wildcard origin + sensitive permission combinations.
-    if (origin === "*" || origin === "*") {
+    if (origin === "*") {
       const blocked = resolvedPerms.filter((p) => RESTRICTED_PERMISSIONS.has(p));
       if (blocked.length > 0) {
         console.error(`Cannot grant ${blocked.join(", ")} to wildcard origin "*".`);

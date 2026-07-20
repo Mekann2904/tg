@@ -21,8 +21,6 @@ export interface Config {
   quitKeys: string[];
   debug: boolean;
   cefControlPreset?: "basic" | "semantic" | "devtools" | "full";
-  kittyRenderer?: "auto" | "ts" | "rust";
-  nativeResolution?: boolean;
   allowHttp?: boolean;
   persist?: boolean;
 }
@@ -70,9 +68,15 @@ export type InputEvent =
 
 export type PixelFormat = "rgba" | "rgb";
 
-export type ScreenshotFrame =
-  | { kind: "buffer"; seq?: number; data: Buffer; width: number; height: number; format: PixelFormat; transfer?: "direct"; dirty?: DirtyRect }
-  | { kind: "file"; seq?: number; path: string; byteLength: number; width: number; height: number; format: PixelFormat; transfer?: "file" | "shm" | "direct"; dirty?: DirtyRect };
+export type ScreenshotFrame = {
+  seq?: number;
+  path: string;
+  byteLength: number;
+  width: number;
+  height: number;
+  format: PixelFormat;
+  dirty?: DirtyRect;
+};
 
 export interface DirtyRect {
   x: number;
@@ -103,17 +107,6 @@ export interface Placement {
   /** pixel offset of the viewport top-left from terminal cell (1,1) */
   xPixel: number;
   yPixel: number;
-}
-
-export interface RGBAFrame {
-  /** raw RGBA/RGB pixels, row-major */
-  buffer: Buffer;
-  width: number;
-  height: number;
-  format?: PixelFormat;
-  transfer?: "direct";
-  /** when set, buffer holds only the dirty-rect pixels (tightly packed) */
-  dirty?: DirtyRect;
 }
 
 export class ExitSignal extends Error {
