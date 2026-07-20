@@ -88,7 +88,6 @@ export class FrameSource {
 
 function toScreenshot(f: InboundFrame): ScreenshotFrame {
   return {
-    kind: "file",
     seq: f.seq,
     path: f.path,
     byteLength: f.byteLength,

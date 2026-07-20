@@ -136,7 +136,7 @@ export class App {
 
         if (this.config.debug && !loggedFirstFrame) {
           loggedFirstFrame = true;
-          debugLog(this.config.debug, `[app] draw first frame kind=${frame.kind} format=${frame.format} placement=${JSON.stringify(viewport.placement())}`);
+          debugLog(this.config.debug, `[app] draw first frame format=${frame.format} placement=${JSON.stringify(viewport.placement())}`);
         }
 
         const place = viewport.placement();
@@ -248,7 +248,7 @@ export class App {
 
           if (event.type === "mouse" && event.action === "move") {
             const moveKey = `${event.col}:${event.row}:${event.button ?? "none"}`;
-            if (moveKey === lastMouseMove) return;
+            if (moveKey === lastMouseMove) continue;
             lastMouseMove = moveKey;
           } else {
             lastMouseMove = "";
@@ -309,7 +309,7 @@ function isQuitEvent(event: import("./types").InputEvent, quitKeys: string[]) {
     mods.alt ? "alt" : "",
     mods.meta ? "meta" : "",
     mods.shift ? "shift" : "",
-    event.key.length === 1 ? event.key.toLowerCase() : event.key.toLowerCase(),
+    event.key.toLowerCase(),
   ].filter(Boolean).join("-");
   return quitKeys.map((k) => k.toLowerCase()).includes(combo);
 }

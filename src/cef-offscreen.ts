@@ -98,13 +98,6 @@ export class CefBrowserController extends HelperProcessBrowserController {
           // to RGBA32; set KITTY_WEBVIEW_PIXEL_FORMAT=rgb to force 24-bit.
           KITTY_WEBVIEW_PIXEL_FORMAT: process.env.KITTY_WEBVIEW_PIXEL_FORMAT || "rgba",
 
-          // POSIX shm (t=s) is the only frame transport: every frame bypasses
-          // the PTY and deltas run through the two-frame staging pipeline for
-          // an atomic visible-frame swap. The env pin keeps the prebuilt CEF
-          // helper (which still reads it) on shm until it is rebuilt against
-          // the shm-only cef-core.
-          KITTY_WEBVIEW_TRANSFER: process.env.KITTY_WEBVIEW_TRANSFER || "shm",
-
           ...resolveCefLayerEnv(config),
         },
         args: [

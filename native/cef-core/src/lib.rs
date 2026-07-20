@@ -3,16 +3,12 @@ use std::ffi::{c_char, CString};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod command;
-mod error;
 mod frame;
-mod input;
-mod protocol;
 mod semantic;
 mod slots;
 
 pub use command::Command;
 pub use frame::{convert_bgra_into, convert_bgra_rect_into, DirtyRect};
-pub use protocol::build_frame_header;
 pub use semantic::{build_assist_editable_click_js, build_cursor_event_json, build_edit_key_js, build_hit_test_js, build_insert_text_js, c_string_from_ptr, cstring_lossy, strip_hit_test_console_prefix};
 pub use slots::ShmSlots;
 
@@ -53,11 +49,8 @@ pub struct KittyCoreFrameMeta {
     pub seq: u64,
     pub width: u32,
     pub height: u32,
-    pub stride: u32,
     pub byte_len: usize,
     pub path_ptr: *const c_char,
-    pub transfer_ptr: *const c_char,
-    pub data_ptr: *const u8,
     pub dirty_valid: u32,
     pub dirty_x: u32,
     pub dirty_y: u32,
@@ -104,7 +97,6 @@ static CORE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 thread_local! {
     static LAST_PATH: RefCell<CString> = RefCell::new(CString::new("").unwrap());
-    static LAST_TRANSFER: RefCell<CString> = RefCell::new(CString::new("").unwrap());
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::new("").unwrap());
     static LAST_JSON: RefCell<CString> = RefCell::new(CString::new("").unwrap());
     static LAST_JS: RefCell<CString> = RefCell::new(CString::new("").unwrap());
@@ -275,7 +267,6 @@ pub extern "C" fn kitty_core_write_bgra_frame(
     }
 
     let seq = CORE_SEQ.fetch_add(1, Ordering::Relaxed);
-    let stride = width as usize * if core.rgb { 3 } else { 4 };
     let byte_len = core.converted_frame.len();
 
     // POSIX shm is the only transport. Each frame is written to a single-use
@@ -315,9 +306,7 @@ pub extern "C" fn kitty_core_write_bgra_frame(
     out_ref.seq = seq;
     out_ref.width = width;
     out_ref.height = height;
-    out_ref.stride = stride as u32;
     out_ref.byte_len = byte_len;
-    out_ref.data_ptr = std::ptr::null();
     if let Some(rect) = dirty {
         out_ref.dirty_valid = 1;
         out_ref.dirty_x = rect.x;
@@ -338,11 +327,6 @@ pub extern "C" fn kitty_core_write_bgra_frame(
     LAST_PATH.with(|lp| {
         *lp.borrow_mut() = cstring_lossy(&written);
         out_ref.path_ptr = lp.borrow().as_ptr();
-    });
-
-    LAST_TRANSFER.with(|lt| {
-        *lt.borrow_mut() = CString::new("shm").unwrap();
-        out_ref.transfer_ptr = lt.borrow().as_ptr();
     });
 
     core.last_error.clear();

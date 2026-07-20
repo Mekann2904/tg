@@ -38,7 +38,6 @@ export class HelperProcessBrowserController {
   private sock?: Socket;
   private frameWidth = 0;
   private frameHeight = 0;
-  private frameStride = 0;
   private expectedFrameWidth = 0;
   private expectedFrameHeight = 0;
   private expectedFrameGeneration = 0;
@@ -211,11 +210,6 @@ export class HelperProcessBrowserController {
   }
   async type(text: string) { this.send({ type: "text", text }); }
   async press(key: string, modifiers?: KeyModifiers) { this.send({ type: "key", key, modifiers }); }
-  async scroll(dx: number, dy: number) {
-    // Wheel target: center of the viewport in CSS pixels.
-    // frameWidth/Height already equals browser CSS size (terminal physical pixels).
-    await this.wheel(Math.round(this.frameWidth / 2), Math.round(this.frameHeight / 2), dx, dy);
-  }
 
   private nextClickCount(x: number, y: number, button: MouseButton): number {
     const now = performance.now();
@@ -348,7 +342,6 @@ export class HelperProcessBrowserController {
 
       this.frameWidth = hdr.width;
       this.frameHeight = hdr.height;
-      this.frameStride = hdr.stride || hdr.width * (hdr.format === "rgb" ? 3 : 4);
       const format = hdr.format === "rgb" ? "rgb" : "rgba";
 
       const frame: InboundFrame = {

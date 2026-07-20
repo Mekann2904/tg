@@ -18,7 +18,6 @@ export const defaultConfig: Omit<Config, "url"> = {
   quitKeys: ["ctrl-c", "ctrl-q"],
   debug: false,
   cefControlPreset: undefined,
-  nativeResolution: false,
 };
 
 export function parseConfig(args: string[]): Config {
@@ -96,9 +95,6 @@ export function parseConfig(args: string[]): Config {
       case "scroll-coalesce-ms":
         config.scrollCoalesceMs = parseNonNegativeInt(takeValue(), key);
         break;
-      case "native":
-        config.nativeResolution = true;
-        break;
       case "allow-http":
         config.allowHttp = true;
         break;
@@ -130,7 +126,7 @@ export function parseConfig(args: string[]): Config {
 
 function usage(): never {
   throw new Error(
-    "Usage: kitty-webview <url> [--cef-control=basic|semantic|devtools|full] [--fps=60] [--capture-fps=N] [--site-profile=default|stable] [--width=N] [--height=N] [--scale=1] [--zoom=1] [--max-width=N] [--max-height=N] [--display-scale=1] [--resize-debounce=300] [--scroll-coalesce-ms=8] [--mouse-mode=sgr|sgr-pixel] [--no-alt-screen] [--quit-keys=ctrl-q] [--debug] [--native] [--user-agent=...]"
+    "Usage: kitty-webview <url> [--cef-control=basic|semantic|devtools|full] [--fps=60] [--capture-fps=N] [--site-profile=default|stable] [--width=N] [--height=N] [--scale=1] [--zoom=1] [--max-width=N] [--max-height=N] [--display-scale=1] [--resize-debounce=300] [--scroll-coalesce-ms=8] [--mouse-mode=sgr|sgr-pixel] [--no-alt-screen] [--quit-keys=ctrl-q] [--debug] [--user-agent=...]"
   );
 }
 

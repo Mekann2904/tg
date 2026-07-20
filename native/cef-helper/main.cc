@@ -40,7 +40,7 @@
 #include <vector>
 
 #if defined(_WIN32)
-#error "This starter helper intentionally implements the POSIX transport path only. Port FrameServer/RawSlots to Win32 before building on Windows."
+#error "This starter helper intentionally implements the POSIX transport path only. Port FrameServer to Win32 before building on Windows."
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <limits.h>
@@ -222,14 +222,6 @@ std::string defaultDesktopUserAgent() {
   return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
          "AppleWebKit/537.36 (KHTML, like Gecko) "
          "Chrome/120.0.0.0 Safari/537.36";
-}
-
-std::string defaultRawDirBase() {
-  const char* env = std::getenv("KITTY_WEBVIEW_RAW_DIR");
-  if (env && *env) return env;
-  if (::access("/dev/shm", W_OK | X_OK) == 0) return "/dev/shm";
-  const char* tmp = std::getenv("TMPDIR");
-  return tmp && *tmp ? tmp : "/tmp";
 }
 
 bool mkdirOne(const std::string& path) {
@@ -486,31 +478,6 @@ class FrameServer {
     return writeAll(fd, prefix, sizeof(prefix)) && writeAll(fd, header.data(), header.size());
   }
 
-  bool SendFrame(std::string header, const void* data, size_t data_len) {
-    int fd = client_fd_.load();
-    if (fd < 0) return false;
-    while ((header.size() & 3) != 0) header.push_back(' ');
-    uint32_t header_len = static_cast<uint32_t>(header.size());
-    uint8_t header_prefix[4] = {
-      static_cast<uint8_t>(header_len & 0xff),
-      static_cast<uint8_t>((header_len >> 8) & 0xff),
-      static_cast<uint8_t>((header_len >> 16) & 0xff),
-      static_cast<uint8_t>((header_len >> 24) & 0xff),
-    };
-    uint32_t body_len = static_cast<uint32_t>(data_len);
-    uint8_t body_prefix[4] = {
-      static_cast<uint8_t>(body_len & 0xff),
-      static_cast<uint8_t>((body_len >> 8) & 0xff),
-      static_cast<uint8_t>((body_len >> 16) & 0xff),
-      static_cast<uint8_t>((body_len >> 24) & 0xff),
-    };
-    std::lock_guard<std::mutex> lock(write_mu_);
-    return writeAll(fd, header_prefix, sizeof(header_prefix)) &&
-           writeAll(fd, header.data(), header.size()) &&
-           writeAll(fd, body_prefix, sizeof(body_prefix)) &&
-           writeAll(fd, data, data_len);
-  }
-
  private:
   void AcceptOnce() {
     int lfd = listen_fd_.load();
@@ -543,58 +510,6 @@ class FrameServer {
   std::atomic<int> client_fd_{-1};
   std::thread accept_thread_;
   std::mutex write_mu_;
-};
-
-class RawSlots {
- public:
-  RawSlots() {
-    int slots = 2;
-    if (const char* env = std::getenv("KITTY_WEBVIEW_RAW_SLOTS")) slots = clampInt(std::atoi(env), 2, 16);
-    const std::string base = defaultRawDirBase();
-    std::string tmpl = base + "/kitty-webview-cef-" + std::to_string(getpid()) + "-XXXXXX";
-    std::vector<char> buf(tmpl.begin(), tmpl.end());
-    buf.push_back('\0');
-    char* made = ::mkdtemp(buf.data());
-    dir_ = made ? made : base;
-
-    for (int i = 0; i < slots; ++i) {
-      std::string p = dir_ + "/" + std::to_string(i) + ".rgba";
-      int fd = ::open(p.c_str(), O_CREAT | O_RDWR | O_TRUNC, 0600);
-      if (fd >= 0) {
-        paths_.push_back(p);
-        fds_.push_back(fd);
-      }
-    }
-  }
-
-  ~RawSlots() { Cleanup(); }
-
-  std::string Write(const std::vector<uint8_t>& data) {
-    if (fds_.empty()) return "";
-    if (slot_size_ != data.size()) {
-      slot_size_ = data.size();
-      for (int fd : fds_) ::ftruncate(fd, static_cast<off_t>(slot_size_));
-      next_ = 0;
-    }
-    size_t slot = next_++ % fds_.size();
-    if (::pwrite(fds_[slot], data.data(), data.size(), 0) < 0) return "";
-    return paths_[slot];
-  }
-
-  void Cleanup() {
-    for (int fd : fds_) if (fd >= 0) ::close(fd);
-    for (const auto& p : paths_) ::unlink(p.c_str());
-    if (!dir_.empty()) ::rmdir(dir_.c_str());
-    fds_.clear();
-    paths_.clear();
-  }
-
- private:
-  std::string dir_;
-  std::vector<std::string> paths_;
-  std::vector<int> fds_;
-  size_t next_ = 0;
-  size_t slot_size_ = 0;
 };
 
 struct RuntimeState {
@@ -1834,7 +1749,6 @@ class KittyCefClient : public CefClient,
         << ",\"generation\":" << state_->generation.load()
         << ",\"width\":" << meta.width
         << ",\"height\":" << meta.height
-        << ",\"stride\":" << meta.stride
         << ",\"format\":\"" << (state_->rgb ? "rgb" : "rgba") << "\""
         << ",\"byteLength\":" << meta.byte_len;
 
@@ -1858,7 +1772,7 @@ class KittyCefClient : public CefClient,
                    meta.width,
                    meta.height,
                    meta.byte_len,
-                   (meta.transfer_ptr ? meta.transfer_ptr : "shm"),
+                   "shm",
                    meta.dirty_valid ? meta.dirty_width : 0,
                    meta.dirty_valid ? meta.dirty_height : 0,
                    meta.dirty_valid ? meta.dirty_x : 0,
@@ -2144,7 +2058,7 @@ int main(int argc, char** argv) {
   CefMainArgs main_args(argc, argv);
   CefRefPtr<KittyCefApp> app = new KittyCefApp(&state);
 
-  // Must happen before starting the browser-process-only TCP/file transport.
+  // Must happen before starting the browser-process-only TCP frame transport.
   // CEF subprocesses re-enter this executable with different argv.
   int exit_code = CefExecuteProcess(main_args, app, nullptr);
   std::fprintf(stderr, "[cef] CefExecuteProcess returned %d\n", exit_code);

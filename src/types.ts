@@ -21,7 +21,6 @@ export interface Config {
   quitKeys: string[];
   debug: boolean;
   cefControlPreset?: "basic" | "semantic" | "devtools" | "full";
-  nativeResolution?: boolean;
   allowHttp?: boolean;
   persist?: boolean;
 }
@@ -70,7 +69,6 @@ export type InputEvent =
 export type PixelFormat = "rgba" | "rgb";
 
 export type ScreenshotFrame = {
-  kind: "file";
   seq?: number;
   path: string;
   byteLength: number;

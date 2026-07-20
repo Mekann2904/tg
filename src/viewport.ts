@@ -1,5 +1,9 @@
 import type { BrowserSize, Config, Placement, TerminalSize } from "./types";
 
+/** Fallback cell size in terminal pixels when the terminal does not report one. */
+const DEFAULT_CELL_WIDTH_PX = 10;
+const DEFAULT_CELL_HEIGHT_PX = 20;
+
 export class ViewportMapper {
   private terminal: TerminalSize;
   private browser: BrowserSize;
@@ -23,6 +27,17 @@ export class ViewportMapper {
     return this.place;
   }
 
+  /** Resolved cell width in terminal pixels, derived from the current terminal size. */
+  private get cellWidth(): number {
+    const termPixelW = this.terminal.pixelWidth ?? this.terminal.cols * DEFAULT_CELL_WIDTH_PX;
+    return termPixelW / Math.max(1, this.terminal.cols);
+  }
+
+  private get cellHeight(): number {
+    const termPixelH = this.terminal.pixelHeight ?? this.terminal.rows * DEFAULT_CELL_HEIGHT_PX;
+    return termPixelH / Math.max(1, this.terminal.rows);
+  }
+
   terminalCellToBrowserPixel(col: number, row: number) {
     const relCol = col - this.place.xCell;
     const relRow = row - this.place.yCell;
@@ -38,26 +53,16 @@ export class ViewportMapper {
 
   /** Convert terminal pixel coordinates (sgr-pixel mode) to terminal cell coordinates. */
   terminalPixelToCell(pixelX: number, pixelY: number) {
-    const termPixelW = this.terminal.pixelWidth ?? this.terminal.cols * 10;
-    const termPixelH = this.terminal.pixelHeight ?? this.terminal.rows * 20;
-    const cw = termPixelW / Math.max(1, this.terminal.cols);
-    const ch = termPixelH / Math.max(1, this.terminal.rows);
-
     return {
-      col: clamp(Math.floor((pixelX - 1) / Math.max(1, cw)) + 1, 1, this.terminal.cols),
-      row: clamp(Math.floor((pixelY - 1) / Math.max(1, ch)) + 1, 1, this.terminal.rows),
+      col: clamp(Math.floor((pixelX - 1) / Math.max(1, this.cellWidth)) + 1, 1, this.terminal.cols),
+      row: clamp(Math.floor((pixelY - 1) / Math.max(1, this.cellHeight)) + 1, 1, this.terminal.rows),
     };
   }
 
   /** Convert terminal pixel coordinates (sgr-pixel mode) to browser CSS pixels. */
   terminalPixelToBrowserPixel(pixelX: number, pixelY: number) {
-    const termPixelW = this.terminal.pixelWidth ?? this.terminal.cols * 10;
-    const termPixelH = this.terminal.pixelHeight ?? this.terminal.rows * 20;
-    const cw = termPixelW / Math.max(1, this.terminal.cols);
-    const ch = termPixelH / Math.max(1, this.terminal.rows);
-
-    const viewportPixelW = this.place.cols * cw;
-    const viewportPixelH = this.place.rows * ch;
+    const viewportPixelW = this.place.cols * this.cellWidth;
+    const viewportPixelH = this.place.rows * this.cellHeight;
 
     // SGR pixel mouse coordinates are 1-based, like cell SGR coordinates.
     const relX = pixelX - 1 - this.place.xPixel;
@@ -75,14 +80,11 @@ export class ViewportMapper {
   resize(size: TerminalSize, devicePixelRatio = 1): BrowserSize {
     this.terminal = size;
 
-    const estimatedCellWidth = 10;
-    const estimatedCellHeight = 20;
-    const terminalPixelWidth = size.pixelWidth ?? Math.round(size.cols * estimatedCellWidth);
-    const terminalPixelHeight = size.pixelHeight ?? Math.round(size.rows * estimatedCellHeight);
-
     // CEF view dimensions are CSS pixels (DIPs); OnPaint multiplies them by
     // devicePixelRatio to produce the physical bitmap consumed by Kitty.
     const dpr = Math.max(0.5, devicePixelRatio);
+    const terminalPixelWidth = this.cellWidth * this.terminal.cols;
+    const terminalPixelHeight = this.cellHeight * this.terminal.rows;
     const cssWidth = Math.round((terminalPixelWidth / dpr) * this.config.viewportScale * this.config.displayScale);
     const cssHeight = Math.round((terminalPixelHeight / dpr) * this.config.viewportScale * this.config.displayScale);
 
@@ -103,33 +105,20 @@ export class ViewportMapper {
     const maxCols = Math.max(1, Math.floor(this.terminal.cols * this.config.displayScale));
     const maxRows = Math.max(1, Math.floor(this.terminal.rows * this.config.displayScale));
 
-    const terminalPixelWidth = this.terminal.pixelWidth ?? this.terminal.cols * 10;
-    const terminalPixelHeight = this.terminal.pixelHeight ?? this.terminal.rows * 20;
-    const cellWidth = terminalPixelWidth / Math.max(1, this.terminal.cols);
-    const cellHeight = terminalPixelHeight / Math.max(1, this.terminal.rows);
-
     const browserRatio = this.browser.width / this.browser.height;
-    const placementRatio = (maxCols * cellWidth) / (maxRows * cellHeight);
+    const placementRatio = (maxCols * this.cellWidth) / (maxRows * this.cellHeight);
 
     let cols = maxCols;
     let rows = maxRows;
 
     if (placementRatio > browserRatio) {
-      cols = Math.max(1, Math.round((rows * cellHeight * browserRatio) / cellWidth));
+      cols = Math.max(1, Math.round((rows * this.cellHeight * browserRatio) / this.cellWidth));
     } else {
-      rows = Math.max(1, Math.round((cols * cellWidth) / browserRatio / cellHeight));
+      rows = Math.max(1, Math.round((cols * this.cellWidth) / browserRatio / this.cellHeight));
     }
 
     const xCell = Math.max(1, Math.floor((this.terminal.cols - cols) / 2) + 1);
     const yCell = Math.max(1, Math.floor((this.terminal.rows - rows) / 2) + 1);
-
-    // estimate pixel offset of viewport top-left from terminal cell (1,1)
-    const termPixelW = this.terminal.pixelWidth ?? this.terminal.cols * 10;
-    const termPixelH = this.terminal.pixelHeight ?? this.terminal.rows * 20;
-    const cw = termPixelW / Math.max(1, this.terminal.cols);
-    const ch = termPixelH / Math.max(1, this.terminal.rows);
-    const xPixel = Math.round((xCell - 1) * cw);
-    const yPixel = Math.round((yCell - 1) * ch);
 
     return {
       xCell,
@@ -139,10 +128,10 @@ export class ViewportMapper {
       // Actual destination size in terminal pixels. Raw image sources should aim
       // to match this size exactly; otherwise Kitty has to resample and text
       // becomes visibly soft on macOS/Retina.
-      pixelWidth: Math.max(1, Math.round(cols * cw)),
-      pixelHeight: Math.max(1, Math.round(rows * ch)),
-      xPixel,
-      yPixel,
+      pixelWidth: Math.max(1, Math.round(cols * this.cellWidth)),
+      pixelHeight: Math.max(1, Math.round(rows * this.cellHeight)),
+      xPixel: Math.round((xCell - 1) * this.cellWidth),
+      yPixel: Math.round((yCell - 1) * this.cellHeight),
     };
   }
 }

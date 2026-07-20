@@ -120,8 +120,8 @@ test("file frame shape is preserved through next()", () => {
   fs.setExpectedSize(100, 100);
   fs.push(frame(1, 100, 100, { path: "/dev/shm/x", dirty: { x: 1, y: 2, width: 3, height: 4 } }));
   const got = fs.next();
-  expect(got?.kind).toBe("file");
-  if (got?.kind === "file") {
+  expect(got).not.toBeNull();
+  if (got) {
     expect(got.path).toBe("/dev/shm/x");
     expect(got.dirty).toEqual({ x: 1, y: 2, width: 3, height: 4 });
   }

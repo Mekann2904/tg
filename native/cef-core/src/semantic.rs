@@ -5,6 +5,8 @@
 
 use std::ffi::{c_char, CStr, CString};
 
+use crate::json_escape;
+
 /// Build a cursor-change metadata JSON for TCP transmission.
 pub fn build_cursor_event_json(cursor: &str) -> String {
     format!(
@@ -281,23 +283,4 @@ pub fn log_semantic_debug(debug: bool, target: &str, msg: &str) {
 /// JSON-escape a string and wrap in double quotes.
 fn json_quote(s: &str) -> String {
     format!("\"{}\"", json_escape(s))
-}
-
-/// JSON-escape a string (without wrapping quotes).
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out
 }
