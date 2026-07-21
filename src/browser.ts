@@ -1,6 +1,5 @@
-import type { BrowserCursorShape, BrowserHitTest, BrowserSize, Config } from "./types";
+import type { BrowserCursorShape, BrowserHitTest, BrowserSize } from "./types";
 import type { InboundFrame } from "./frame-source";
-import { CefBrowserController } from "./cef-offscreen";
 
 export interface BrowserController {
   open(initialSize?: BrowserSize): Promise<void>;
@@ -19,8 +18,4 @@ export interface BrowserController {
   onRawFrame?: (frame: InboundFrame) => void;
   onCursorChange?: (cursor: BrowserCursorShape) => void;
   onHitTest?: (hit: BrowserHitTest) => void;
-}
-
-export function createBrowserController(config: Config): BrowserController {
-  return new CefBrowserController(config) as any;
 }
