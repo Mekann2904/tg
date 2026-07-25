@@ -3,68 +3,6 @@ import { join } from "node:path";
 import type { Config } from "./types";
 import { HelperProcessBrowserController } from "./helper-process-browser";
 
-type CefControlPreset = "basic" | "semantic" | "devtools" | "full";
-
-function cefControlPreset(config: Config): CefControlPreset {
-  const value = config.cefControlPreset ?? process.env.KITTY_WEB_UI_CEF_CONTROL_PRESET;
-  if (value === "basic" || value === "semantic" || value === "devtools" || value === "full") return value;
-  return "full";
-}
-
-function presetDefault(name: string, enabled: boolean) {
-  return process.env[name] ?? (enabled ? "1" : "0");
-}
-
-function resolveCefLayerEnv(config: Config): Record<string, string> {
-  const preset = cefControlPreset(config);
-
-  const messageRouter =
-    preset === "semantic" ||
-    preset === "devtools" ||
-    preset === "full";
-
-  const devtools =
-    preset === "devtools" ||
-    preset === "full";
-
-  const devtoolsInput =
-    preset === "devtools" ||
-    preset === "full";
-
-  const accessibility =
-    preset === "full";
-
-  return {
-    // Presets:
-    //   basic     = CEF OSR + physical input only
-    //   semantic  = MessageRouter semantic events only
-    //   devtools  = MessageRouter + DevTools + DevTools input
-    //   full      = devtools + throttled Accessibility summary
-    //
-    // Individual env vars still override the preset.
-    KITTY_WEB_UI_CEF_MESSAGE_ROUTER: presetDefault("KITTY_WEB_UI_CEF_MESSAGE_ROUTER", messageRouter),
-    KITTY_WEB_UI_CEF_DEVTOOLS_LAYER: presetDefault("KITTY_WEB_UI_CEF_DEVTOOLS_LAYER", devtools),
-    KITTY_WEB_UI_CEF_INPUT_DEVTOOLS: presetDefault("KITTY_WEB_UI_CEF_INPUT_DEVTOOLS", devtoolsInput),
-    KITTY_WEB_UI_CEF_ACCESSIBILITY: presetDefault("KITTY_WEB_UI_CEF_ACCESSIBILITY", accessibility),
-
-    // Current best-known stable profile:
-    //   Rust Kitty renderer + CEF full control + throttled semantic hit-test.
-    // Cursor shape still comes from CEF OnCursorChange; hit-test is metadata
-    // and should not run for every mouse pixel.
-    KITTY_WEB_UI_CEF_HITTEST_THROTTLE_MS: process.env.KITTY_WEB_UI_CEF_HITTEST_THROTTLE_MS ?? "75",
-    KITTY_WEB_UI_CEF_HITTEST_MIN_DELTA_PX: process.env.KITTY_WEB_UI_CEF_HITTEST_MIN_DELTA_PX ?? "8",
-
-    // Keep exactly one frame in flight. Dirty frames are relative to the last
-    // delivered frame, so allowing the helper to outrun Kitty can create gaps
-    // that no later delta can repair. ACK is sent after stdout write/drain.
-    KITTY_WEB_UI_CEF_FRAME_ACK: process.env.KITTY_WEB_UI_CEF_FRAME_ACK ?? "1",
-    KITTY_WEB_UI_CEF_FLOW_CONTROL: process.env.KITTY_WEB_UI_CEF_FLOW_CONTROL ?? "1",
-    KITTY_WEB_UI_CEF_MAX_UNACKED_FRAMES: process.env.KITTY_WEB_UI_CEF_MAX_UNACKED_FRAMES ?? "1",
-
-    KITTY_WEB_UI_CEF_ACCESSIBILITY_THROTTLE_MS: process.env.KITTY_WEB_UI_CEF_ACCESSIBILITY_THROTTLE_MS ?? "1000",
-  };
-}
-
 function resolveCefHelper(): string {
   const env = process.env.KITTY_WEB_UI_CEF_HELPER;
   if (env) return env;
@@ -98,7 +36,14 @@ export class CefBrowserController extends HelperProcessBrowserController {
           // to RGBA32; set KITTY_WEBVIEW_PIXEL_FORMAT=rgb to force 24-bit.
           KITTY_WEBVIEW_PIXEL_FORMAT: process.env.KITTY_WEBVIEW_PIXEL_FORMAT || "rgba",
 
-          ...resolveCefLayerEnv(config),
+          // One frame in flight, always. Dirty frames are relative to the last
+          // delivered frame, so letting the helper outrun Kitty creates gaps no
+          // later delta can repair. These match the native defaults (see
+          // main.cc enableFrameAck / enableFlowControl / maxUnackedFrames) but
+          // are stated here because this controller drives the ACKs.
+          KITTY_WEB_UI_CEF_FRAME_ACK: process.env.KITTY_WEB_UI_CEF_FRAME_ACK ?? "1",
+          KITTY_WEB_UI_CEF_FLOW_CONTROL: process.env.KITTY_WEB_UI_CEF_FLOW_CONTROL ?? "1",
+          KITTY_WEB_UI_CEF_MAX_UNACKED_FRAMES: process.env.KITTY_WEB_UI_CEF_MAX_UNACKED_FRAMES ?? "1",
         },
         args: [
           ctx.url,

@@ -2,12 +2,10 @@
   "name": "kitty-webview",
   "type": "module",
   "bin": {
-    "kitty-webview": "./src/main.ts",
-    "kitty-webview-permissions": "./src/permissions-cli.ts"
+    "kitty-webview": "./src/main.ts"
   },
   "scripts": {
     "dev": "bun run src/main.ts",
-    "permissions": "bun run src/permissions-cli.ts permissions",
     "check": "bun --bun tsc --noEmit",
     "test": "bun test",
     "build:cef": "./scripts/build-cef-helper.sh",

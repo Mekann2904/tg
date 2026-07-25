@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { connect, type Socket } from "node:net";
-import type { BrowserCursorShape, BrowserHitTest, BrowserSize, Config, KeyModifiers, MouseButton } from "./types";
+import type { BrowserCursorShape, BrowserHitTest, BrowserSize, Config, DirtyRect, KeyModifiers, MouseButton, PixelFormat } from "./types";
 import type { InboundFrame } from "./frame-source";
 import { debugLog, writeDebugBytes } from "./debug";
 import { resolveSystemDpr } from "./system-dpr";
@@ -33,28 +33,56 @@ export interface HelperProcessBrowserOptions {
   spawn: (ctx: HelperSpawnContext) => HelperSpawnSpec;
 }
 
+// Headers are small JSON (frame metadata, cursor, hit-test), well under 1 KiB.
+// Cap at 64 KiB so a corrupted length prefix fails fast instead of allocating.
+const MAX_HEADER_BYTES = 65_536;
+
+// Inbound helper messages. The C++ helper owns this shape (main.cc emits these
+// via SendHeader); a deviation is a fatal contract violation, not line noise.
+type InboundFrameFileHeader = {
+  type: "frameFile";
+  seq?: number;
+  generation?: number;
+  width: number;
+  height: number;
+  format?: PixelFormat;
+  byteLength: number;
+  path: string;
+  dirty?: DirtyRect;
+};
+type InboundCursorHeader = { type: "cursor"; cursor?: string };
+type InboundHitTestHeader = {
+  type: "hitTest";
+  x?: number;
+  y?: number;
+  cursor?: string;
+  editable?: boolean;
+  clickable?: boolean;
+  selectable?: boolean;
+  tag?: string;
+  role?: string;
+  inputType?: string;
+  label?: string;
+};
+type InboundHeader = InboundFrameFileHeader | InboundCursorHeader | InboundHitTestHeader;
+
 export class HelperProcessBrowserController {
   private proc?: ChildProcess;
   private sock?: Socket;
-  private frameWidth = 0;
-  private frameHeight = 0;
+  private buf = Buffer.alloc(0);
+  private dead = false;
   private expectedFrameWidth = 0;
   private expectedFrameHeight = 0;
   private expectedFrameGeneration = 0;
   private dpr: number;
   private lastPressedButton: MouseButton | null = null;
   private lastClick: { x: number; y: number; button: MouseButton; at: number; count: number } | null = null;
-  private chunks: Buffer[] = [];
-  private bufferedBytes = 0;
-  private semanticEventCount = 0;
-  private lastSemanticSummaryAt = 0;
-  private accessibilityEventCount = 0;
   private lastAckedSeq = 0;
-  private lastAccessibilitySummaryAt = 0;
-  private headerParseErrorCount = 0;
   onRawFrame?: (frame: InboundFrame) => void;
   onCursorChange?: (cursor: BrowserCursorShape) => void;
   onHitTest?: (hit: BrowserHitTest) => void;
+  /** Fatal controller error (socket/proc/parse). App wires this to a clean shutdown. */
+  onFatal?: (error: Error) => void;
 
   constructor(private config: Config, private options: HelperProcessBrowserOptions) {
     this.dpr = this.resolveDpr();
@@ -66,6 +94,17 @@ export class HelperProcessBrowserController {
 
   private log(message: string) {
     debugLog(this.config.debug, message);
+  }
+
+  /** Unrecoverable controller error (socket/proc/parse). Logged once, socket
+   *  torn down, then onFatal fires so the app can shut down via its existing
+   *  finally block. Never throw from a socket/proc handler — it bypasses cleanup. */
+  private fatal(message: string) {
+    if (this.dead) return;
+    this.dead = true;
+    debugLog(true, `${this.logPrefix} ${message}`);
+    this.sock?.destroy();
+    this.onFatal?.(new Error(`${this.logPrefix} ${message}`));
   }
 
   private resolveDpr(): number {
@@ -84,7 +123,7 @@ export class HelperProcessBrowserController {
     this.expectedFrameWidth = Math.round(width * this.dpr);
     this.expectedFrameHeight = Math.round(height * this.dpr);
     this.expectedFrameGeneration = 0;
-    const spec = this.options.spawn({ 
+    const spec = this.options.spawn({
       url,
       captureFps,
       dpr: this.dpr,
@@ -132,6 +171,10 @@ export class HelperProcessBrowserController {
       });
     });
 
+    // After the port handshake, a helper exit is fatal to the session. The
+    // handshake listener above still fires but its reject() is a no-op now.
+    this.proc.on("exit", (code) => this.fatal(`${this.options.kind} exited code=${code}`));
+
     this.log(`${this.logPrefix} connecting TCP localhost:${port}`);
     this.sock = connect({ host: "127.0.0.1", port });
     this.sock.on("connect", () => {
@@ -139,7 +182,7 @@ export class HelperProcessBrowserController {
       this.sock!.write(frameNonce + "\n");
     });
     this.sock.on("data", (chunk: Buffer) => this.onData(chunk));
-    this.sock.on("error", (e) => this.log(`${this.logPrefix} socket error: ${e.message}`));
+    this.sock.on("error", (e) => this.fatal(`socket error: ${e.message}`));
 
     // Do not wait for a first 1280x800 paint here. App startup computes the
     // terminal-sized viewport and sends it immediately; waiting for an initial
@@ -246,224 +289,82 @@ export class HelperProcessBrowserController {
     this.proc?.kill();
   }
 
+  // Length-prefixed JSON header stream. Every message (frame metadata, cursor,
+  // hit-test) is a small header; pixels travel out-of-band via shm, referenced
+  // by hdr.path. Dirty frames depend on their predecessor, so headers are
+  // handled in arrival order. Same framing pattern as KittyRenderer.
   private onData(chunk: Buffer) {
-    this.chunks.push(chunk);
-    this.bufferedBytes += chunk.length;
+    if (this.dead) return;
+    this.buf = Buffer.concat([this.buf, chunk]);
 
-    // State-machine parser: preserve every complete frame in stream order.
-    // Dirty frames depend on their predecessor, so newest-only sampling here
-    // would permanently lose changed regions. Avoid Buffer.concat(): raw frames
-    // can be several MB and repeated concatenation creates excessive copying.
-    const completeFrames: { hdr: any }[] = [];
-
-    while (this.bufferedBytes >= 4) {
-      const hdrLenBuf = this.peekBytes(4);
-      if (!hdrLenBuf) break;
-
-      const hdrLen = hdrLenBuf.readUInt32LE(0);
-
-      // Header should be small JSON. If this is absurd, assume stream corruption
-      // and skip one byte to try to resync.
-      if (hdrLen <= 0 || hdrLen > 1_048_576) {
-        this.skipBytes(1);
-        continue;
+    while (this.buf.length >= 4) {
+      const hdrLen = this.buf.readUInt32LE(0);
+      // The helper is a trusted localhost+nonce peer, so a malformed length or
+      // JSON body is a contract violation, not line noise — fail fast rather
+      // than byte-resync (which only produces a misaligned garbage stream).
+      if (hdrLen <= 0 || hdrLen > MAX_HEADER_BYTES) {
+        this.fatal(`invalid frame length ${hdrLen}`);
+        return;
       }
+      if (this.buf.length < 4 + hdrLen) break;
 
-      const headerEnd = 4 + hdrLen;
-      if (this.bufferedBytes < headerEnd) break;
-
-      const hdrData = this.peekBytes(hdrLen, 4);
-      if (!hdrData) break;
-
-      let hdr: any;
+      const hdrBytes = this.buf.subarray(4, 4 + hdrLen);
+      let hdr: InboundHeader;
       try {
-        hdr = JSON.parse(hdrData.toString("utf8"));
-      } catch {
-        this.headerParseErrorCount++;
-        if (this.config.debug && (this.headerParseErrorCount <= 5 || this.headerParseErrorCount % 100 === 0)) {
-          this.log(
-            `${this.logPrefix} invalid frame header count=${this.headerParseErrorCount} header=${JSON.stringify(hdrData.toString("utf8").slice(0, 200))}`,
-          );
-        }
-        this.skipBytes(1);
-        continue;
+        hdr = JSON.parse(hdrBytes.toString("utf8")) as InboundHeader;
+      } catch (e) {
+        this.fatal(`invalid frame header: ${(e as Error).message}`);
+        return;
       }
+      this.buf = this.buf.subarray(4 + hdrLen);
+      this.dispatchHeader(hdr);
+    }
+  }
 
-      if (hdr.type === "cursor") {
-        this.skipBytes(headerEnd);
+  // Bytes are consumed in onData before dispatch; unknown types are ignored.
+  private dispatchHeader(hdr: InboundHeader) {
+    switch (hdr.type) {
+      case "cursor":
         this.onCursorChange?.(normalizeCursorShape(hdr.cursor));
-        continue;
-      }
-
-      if (hdr.type === "hitTest") {
-        this.skipBytes(headerEnd);
+        break;
+      case "hitTest":
         this.onHitTest?.(normalizeHitTest(hdr));
         if (typeof hdr.cursor === "string") this.onCursorChange?.(normalizeCursorShape(hdr.cursor));
-        continue;
-      }
-
-      if (hdr.type === "messageRouter") {
-        this.skipBytes(headerEnd);
-        this.onMessageRouterEvent(hdr);
-        continue;
-      }
-
-      if (hdr.type === "accessibility") {
-        this.skipBytes(headerEnd);
-        this.onAccessibilityEvent(hdr);
-        continue;
-      }
-
-      if (hdr.type === "frameFile" && typeof hdr.byteLength === "number" && typeof hdr.path === "string") {
-        // File-transfer frames contain only a length-prefixed JSON header; the
-        // raw pixels live in the path named by hdr.path. Do not wait for the
-        // following 4-byte payload length used by inline "frame" messages.
-        // Waiting for those bytes makes every file frame one message late and
-        // a static first paint can time out until another paint/resize arrives.
-        this.skipBytes(headerEnd);
-        completeFrames.push({ hdr });
-        continue;
-      }
-
-      // Unrecognized header-only message type; skip and resync.
-      this.skipBytes(headerEnd);
-    }
-
-    for (const { hdr } of completeFrames) {
-      const generation = Number(hdr.generation) || 0;
-      if (generation !== this.expectedFrameGeneration) {
-        const seq = Number(hdr.seq) || undefined;
-        this.log(
-          `${this.logPrefix} discard stale generation seq=${seq ?? "?"} frame=${generation} expected=${this.expectedFrameGeneration} ${hdr.width}x${hdr.height}`,
-        );
-        if (seq) this.ackFrame(seq);
-        continue;
-      }
-
-      this.frameWidth = hdr.width;
-      this.frameHeight = hdr.height;
-      const format = hdr.format === "rgb" ? "rgb" : "rgba";
-
-      const frame: InboundFrame = {
-        seq: Number(hdr.seq) || undefined,
-        path: hdr.path,
-        byteLength: hdr.byteLength,
-        width: this.frameWidth,
-        height: this.frameHeight,
-        format,
-        dirty: hdr.dirty,
-      };
-
-      if (hdr.seq <= 2) {
-        this.log(`${this.logPrefix} frame ${hdr.seq} ${hdr.width}x${hdr.height} dpr=${this.dpr}`);
-      }
-
-      this.onRawFrame?.(frame);
+        break;
+      case "frameFile":
+        this.dispatchFrameFile(hdr);
+        break;
+      default:
+        break;
     }
   }
 
-  private onMessageRouterEvent(hdr: any) {
-    this.semanticEventCount++;
+  private dispatchFrameFile(hdr: InboundFrameFileHeader) {
+    const generation = Number(hdr.generation) || 0;
+    const seq = Number(hdr.seq) || undefined;
 
-    const payload = hdr?.payload;
-    const semantic = payload?.type === "semantic" ? payload : undefined;
-    const kind = semantic?.kind ?? hdr?.kind ?? "unknown";
-
-    // selectionchange/input can be very noisy. Keep detailed logs opt-in.
-    if (process.env.KITTY_WEB_UI_SEMANTIC_DEBUG === "1") {
-      this.log(`${this.logPrefix} semantic ${JSON.stringify(payload ?? hdr)}`);
-      return;
-    }
-
-    const important =
-      kind === "bridge-installed" ||
-      kind === "focusin" ||
-      kind === "focusout" ||
-      kind === "compositionstart" ||
-      kind === "compositionend";
-
-    if (important) {
-      this.log(`${this.logPrefix} semantic kind=${kind} payload=${JSON.stringify(payload)}`);
-      return;
-    }
-
-    const now = performance.now();
-    if (now - this.lastSemanticSummaryAt > 1000) {
-      this.lastSemanticSummaryAt = now;
-      this.log(`${this.logPrefix} semantic events=${this.semanticEventCount} lastKind=${kind}`);
-    }
-  }
-
-  private onAccessibilityEvent(hdr: any) {
-    this.accessibilityEventCount++;
-
-    if (process.env.KITTY_WEB_UI_ACCESSIBILITY_DEBUG === "1") {
-      this.log(`${this.logPrefix} accessibility ${JSON.stringify(hdr)}`);
-      return;
-    }
-
-    if (hdr.kind === "summary") {
+    if (generation !== this.expectedFrameGeneration) {
       this.log(
-        `${this.logPrefix} accessibility summary tree=${hdr.treeEvents ?? 0} location=${hdr.locationEvents ?? 0}`,
+        `${this.logPrefix} discard stale generation seq=${seq ?? "?"} frame=${generation} expected=${this.expectedFrameGeneration} ${hdr.width}x${hdr.height}`,
       );
+      if (seq) this.ackFrame(seq);
       return;
     }
 
-    const now = performance.now();
-    if (now - this.lastAccessibilitySummaryAt > 1000) {
-      this.lastAccessibilitySummaryAt = now;
-      this.log(
-        `${this.logPrefix} accessibility events=${this.accessibilityEventCount} lastKind=${hdr.kind ?? "unknown"}`,
-      );
-    }
-  }
-
-  private peekBytes(length: number, offset = 0): Buffer | null {
-    if (this.bufferedBytes < offset + length) return null;
-
-    const out = Buffer.allocUnsafe(length);
-    let copied = 0;
-    let skipped = 0;
-
-    for (const chunk of this.chunks) {
-      if (skipped + chunk.length <= offset) {
-        skipped += chunk.length;
-        continue;
-      }
-
-      const start = Math.max(0, offset - skipped);
-      const available = chunk.length - start;
-      const take = Math.min(available, length - copied);
-
-      chunk.copy(out, copied, start, start + take);
-
-      copied += take;
-      skipped += chunk.length;
-
-      if (copied === length) return out;
+    if (seq !== undefined && seq <= 2) {
+      this.log(`${this.logPrefix} frame ${seq} ${hdr.width}x${hdr.height} dpr=${this.dpr}`);
     }
 
-    return null;
+    this.onRawFrame?.({
+      seq,
+      path: hdr.path,
+      byteLength: hdr.byteLength,
+      width: hdr.width,
+      height: hdr.height,
+      format: hdr.format === "rgb" ? "rgb" : "rgba",
+      dirty: hdr.dirty,
+    });
   }
-
-  private skipBytes(length: number) {
-    let remaining = length;
-
-    while (remaining > 0 && this.chunks.length > 0) {
-      const first = this.chunks[0];
-
-      if (first.length <= remaining) {
-        this.chunks.shift();
-        this.bufferedBytes -= first.length;
-        remaining -= first.length;
-      } else {
-        this.chunks[0] = first.subarray(remaining);
-        this.bufferedBytes -= remaining;
-        remaining = 0;
-      }
-    }
-  }
-
 }
 
 function normalizeCursorShape(value: unknown): BrowserCursorShape {
@@ -472,17 +373,26 @@ function normalizeCursorShape(value: unknown): BrowserCursorShape {
     : "default";
 }
 
-function normalizeHitTest(value: any): BrowserHitTest {
+function optNumber(value: unknown, fallback = 0): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function optString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function normalizeHitTest(value: InboundHitTestHeader): BrowserHitTest {
   return {
-    x: Number.isFinite(Number(value?.x)) ? Number(value.x) : 0,
-    y: Number.isFinite(Number(value?.y)) ? Number(value.y) : 0,
-    cursor: normalizeCursorShape(value?.cursor),
-    editable: !!value?.editable,
-    clickable: !!value?.clickable,
-    selectable: !!value?.selectable,
-    tag: typeof value?.tag === "string" ? value.tag : undefined,
-    role: typeof value?.role === "string" ? value.role : undefined,
-    type: typeof value?.inputType === "string" ? value.inputType : undefined,
-    label: typeof value?.label === "string" ? value.label : undefined,
+    x: optNumber(value.x),
+    y: optNumber(value.y),
+    cursor: normalizeCursorShape(value.cursor),
+    editable: !!value.editable,
+    clickable: !!value.clickable,
+    selectable: !!value.selectable,
+    tag: optString(value.tag),
+    role: optString(value.role),
+    type: optString(value.inputType),
+    label: optString(value.label),
   };
 }

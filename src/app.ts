@@ -3,20 +3,21 @@ import { debugLog, DEBUG_LOG_PATH } from "./debug";
 import { dispatchInput } from "./input/dispatcher";
 import { parseStream } from "./input/parser";
 import { PerfStats } from "./perf";
-import { createBrowserController } from "./browser";
+import { CefBrowserController } from "./cef-offscreen";
 import { KittyRenderer } from "./renderer";
 import { FrameSource } from "./frame-source";
 import type { InboundFrame } from "./frame-source";
 import { FramePump } from "./scheduler";
 import { TerminalController } from "./terminal";
 import { ViewportMapper } from "./viewport";
+import { WheelCoalescer } from "./wheel-coalescer";
 
 export class App {
   constructor(private config: Config) {}
 
   async run() {
     const terminal = new TerminalController(this.config);
-    const webview = createBrowserController(this.config);
+    const webview = new CefBrowserController(this.config);
     const renderer = new KittyRenderer(this.config);
     const viewport = new ViewportMapper(this.config);
     // Hybrid mode: paint/input/resize only marks the pump dirty.
@@ -33,14 +34,11 @@ export class App {
     });
     let loggedFirstFrame = false;
     let browserQueue = Promise.resolve();
-    let resizeInProgress = false;
     let latestResize: import("./types").TerminalSize | null = null;
     let resizing = false;
     let dpr = 1;
     let lastMouseMove = "";
     let acceptingEvents = true;
-    let pendingWheel: { x: number; y: number; deltaX: number; deltaY: number; modifiers?: import("./types").KeyModifiers } | null = null;
-    let wheelFlushTimer: Timer | undefined;
     let resizeDebounceTimer: Timer | undefined;
     debugLog(this.config.debug, `[app] debug log path=${DEBUG_LOG_PATH}`);
     debugLog(this.config.debug, `[app] frame config fps=${this.config.fps} captureFps=${this.config.captureFps ?? this.config.fps} siteProfile=${this.config.siteProfile}`);
@@ -54,6 +52,13 @@ export class App {
       return browserQueue;
     };
 
+    const wheelCoalescer = new WheelCoalescer(this.config.scrollCoalesceMs, (wheel) =>
+      enqueueBrowserOperation("wheel dispatch", async () => {
+        await webview.wheel(wheel.x, wheel.y, wheel.deltaX, wheel.deltaY, wheel.modifiers);
+        pump.request("input");
+      }),
+    );
+
     const scheduleResize = () => {
       if (resizeDebounceTimer) {
         clearTimeout(resizeDebounceTimer);
@@ -62,7 +67,6 @@ export class App {
       if (resizing) return;
       resizing = true;
       enqueueBrowserOperation("resize", async () => {
-        resizeInProgress = true;
         try {
           while (latestResize) {
             const nextSize = latestResize;
@@ -80,7 +84,6 @@ export class App {
           }
         } finally {
           resizing = false;
-          resizeInProgress = false;
           pump.request("resize");
           if (latestResize && acceptingEvents) queueResize();
         }
@@ -116,17 +119,19 @@ export class App {
       // The helper emits each parsed frame via onRawFrame; FrameSource preserves
       // dependent deltas in order, applies staleness/backpressure policy, and
       // nudges the pump. The helper's one-in-flight ACK gate prevents backlog.
-      const ctrl = webview as any;
-      ctrl.onRawFrame = (f: InboundFrame) => frameSource.push(f);
-      ctrl.onCursorChange = (cursor: import("./types").BrowserCursorShape) => {
+      webview.onRawFrame = (f: InboundFrame) => frameSource.push(f);
+      webview.onCursorChange = (cursor: import("./types").BrowserCursorShape) => {
         terminal.setPageCursorShape(cursor);
       };
-      ctrl.onHitTest = (hit: import("./types").BrowserHitTest) => {
+      webview.onHitTest = (hit: import("./types").BrowserHitTest) => {
         terminal.setHitTest(hit);
       };
+      // Any controller death (socket error, helper exit, malformed header)
+      // routes through fatal() → here → the normal finally block (terminal.leave).
+      webview.onFatal = () => terminal.requestExit();
 
       pump.onRender(async () => {
-        if (resizeInProgress) return;
+        if (resizing) return;
 
         const frameStart = performance.now();
         const screenshotStart = performance.now();
@@ -158,50 +163,11 @@ export class App {
         perf.sampleFrame();
       });
 
-      const flushWheel = () => {
-        if (wheelFlushTimer) {
-          clearTimeout(wheelFlushTimer);
-          wheelFlushTimer = undefined;
-        }
-        const wheel = pendingWheel;
-        pendingWheel = null;
-        if (!wheel) return;
-        enqueueBrowserOperation("wheel dispatch", async () => {
-          await webview.wheel(wheel.x, wheel.y, wheel.deltaX, wheel.deltaY, wheel.modifiers);
-          pump.request("input");
-        });
-      };
-
       const updatePointerCursorPosition = (event: Extract<InputEvent, { type: "mouse" }>) => {
         const cell = this.config.mouseMode === "sgr-pixel"
           ? viewport.terminalPixelToCell(event.col, event.row)
           : { col: event.col, row: event.row };
         terminal.setPointerCursorPosition(cell.col, cell.row);
-      };
-
-      const queueWheel = (event: Extract<InputEvent, { type: "mouse" }> & { action: "wheel" }) => {
-        updatePointerCursorPosition(event);
-        const { x, y } = viewport.terminalPixelToBrowserPixel(event.col, event.row);
-        const deltaX = event.deltaX ?? 0;
-        const deltaY = event.deltaY ?? 0;
-        if (!pendingWheel) {
-          pendingWheel = { x, y, deltaX, deltaY, modifiers: event.modifiers };
-        } else {
-          pendingWheel.x = x;
-          pendingWheel.y = y;
-          pendingWheel.deltaX += deltaX;
-          pendingWheel.deltaY += deltaY;
-          pendingWheel.modifiers = event.modifiers ?? pendingWheel.modifiers;
-        }
-
-        if (this.config.scrollCoalesceMs === 0) {
-          flushWheel();
-          return;
-        }
-
-        if (!wheelFlushTimer) {
-          wheelFlushTimer = setTimeout(flushWheel, this.config.scrollCoalesceMs);
-        }
       };
 
       // Streaming input buffer. 1 MB cap prevents unbounded growth from
@@ -238,13 +204,14 @@ export class App {
           if (event.type === "mouse") updatePointerCursorPosition(event);
           if (event.type === "mouse" && event.action === "wheel") {
             lastMouseMove = "";
-            queueWheel(event as InputEvent & { type: "mouse"; action: "wheel" });
+            const { x, y } = viewport.terminalPixelToBrowserPixel(event.col, event.row);
+            wheelCoalescer.queue(x, y, event.deltaX ?? 0, event.deltaY ?? 0, event.modifiers);
             continue;
           }
 
           // Preserve input ordering: a click/key after wheel must not overtake
           // the coalesced wheel event that is waiting for its short flush timer.
-          flushWheel();
+          wheelCoalescer.flush();
 
           if (event.type === "mouse" && event.action === "move") {
             const moveKey = `${event.col}:${event.row}:${event.button ?? "none"}`;
@@ -281,7 +248,7 @@ export class App {
       }
     } finally {
       acceptingEvents = false;
-      if (wheelFlushTimer) clearTimeout(wheelFlushTimer);
+      wheelCoalescer.dispose();
       if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer);
       pump.stop();
       try {

@@ -20,7 +20,6 @@ export interface Config {
   mouseMode: "cell" | "sgr" | "sgr-pixel";
   quitKeys: string[];
   debug: boolean;
-  cefControlPreset?: "basic" | "semantic" | "devtools" | "full";
   allowHttp?: boolean;
   persist?: boolean;
 }

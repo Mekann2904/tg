@@ -17,12 +17,6 @@ sharp rendering on Retina displays.
 
 _Avoid_: Viewport, display area
 
-**Permission**: A capability a web page requests (camera, microphone, geolocation, notifications, etc.). Governed by a deny-by-default policy persisted per site.
-
-_Avoid_: Access right, privilege
-
-**Permission Profile**: A JSON file at `~/.kitty-webview/permissions.json` that stores per-origin permission grants. Managed via CLI subcommands (`permissions allow|deny|list`).
-
 **Dangerous scheme**: A URL scheme blocked at the navigation level: `file:`, `javascript:`, `data:`, `devtools:`, `chrome:`, `chrome-extension:`. Only `https:` and `http:` are allowed.
 
 _Avoid_: Unsafe protocol, blocked origin
@@ -35,10 +29,6 @@ _Avoid_: Unsafe protocol, blocked origin
 
 ## Example dialogue
 
-> **Dev**: ユーザーが `https://meet.google.com` を開いたら、Permission Profile でカメラが allow になってるかチェックして、deny なら画面だけ表示される。
->
-> **Domain expert**: そう。Permission Profile はデフォルトで全 deny。カメラが必要なら `kitty-webview permissions allow https://meet.google.com camera` を事前に実行してもらう。offscreen だから権限プロンプトの UI は出せない。
->
 > **Dev**: 危険スキームの `javascript:` でナビゲートしようとしたら？
 >
 > **Domain expert**: will-navigate 相当のフックでブロックする。http/https 以外は一切通さない。
